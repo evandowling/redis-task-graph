@@ -4,10 +4,15 @@
 //! [`Worker`] claims pending tasks from Redis Streams and calls the processor registered for
 //! each task's type with its deserialized context.
 //!
+//! Tasks can also be linked into chains with [`TaskQueue::chain`], where each step's output
+//! becomes the next step's input. Declaring processors as [`TaskType`] constants makes the
+//! compiler check that adjacent steps' types line up.
+//!
 //! Delivery is at-least-once and normally exactly-once: each task is claimed by a single worker
 //! under a lease kept alive by heartbeats. If a worker crashes or stalls past its lease, another
 //! worker reclaims the task, so processors with side effects should be idempotent.
 
+mod chain;
 mod client;
 mod error;
 mod keys;
@@ -16,8 +21,9 @@ mod scripts;
 mod task;
 mod worker;
 
+pub use chain::{ChainBuilder, ChainId, ChainStatus, DEFAULT_RESULT_TTL};
 pub use client::TaskQueue;
 pub use error::{BoxError, Error, Result};
 pub use registry::Registry;
-pub use task::{TaskEnvelope, TaskId};
+pub use task::{ChainLink, IntoTaskType, TaskEnvelope, TaskId, TaskType};
 pub use worker::{Worker, WorkerConfig, WorkerHandle};

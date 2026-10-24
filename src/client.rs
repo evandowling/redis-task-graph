@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use redis::AsyncCommands;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::streams::StreamRangeReply;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
+use crate::chain::{ChainBuilder, ChainId, ChainStatus, parse_status};
 use crate::error::Result;
 use crate::keys::Keys;
-use crate::task::{PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
+use crate::task::{IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
 
 /// Handle to a namespaced task queue in Redis. Cheap to clone.
 #[derive(Clone)]
@@ -46,22 +50,94 @@ impl TaskQueue {
         self.keys.group()
     }
 
-    /// Enqueues a task to be handled by the processor registered for `processor_type`.
-    pub async fn submit<C: Serialize>(&self, processor_type: &str, context: &C) -> Result<TaskId> {
+    /// Enqueues a task to be handled by the processor registered for `task`, which is either a
+    /// [`TaskType`](crate::TaskType) or a plain string. The processor's output is discarded.
+    pub async fn submit<In: Serialize, Out>(
+        &self,
+        task: impl IntoTaskType<In, Out>,
+        context: &In,
+    ) -> Result<TaskId> {
         let envelope = TaskEnvelope {
             id: TaskId::new(),
-            processor_type: processor_type.to_owned(),
+            processor_type: task.into_name(),
             context: serde_json::to_value(context)?,
             attempt: 0,
             enqueued_at: now_millis(),
             last_error: None,
+            chain: None,
         };
         let payload = serde_json::to_string(&envelope)?;
         let mut conn = self.conn.clone();
         let _: String = conn
-            .xadd(self.keys.stream(processor_type), "*", &[(PAYLOAD_FIELD, payload)])
+            .xadd(
+                self.keys.stream(&envelope.processor_type),
+                "*",
+                &[(PAYLOAD_FIELD, payload)],
+            )
             .await?;
         Ok(envelope.id)
+    }
+
+    /// Starts building a chain whose first step runs `first` with `input`. Add steps with
+    /// [`ChainBuilder::then`] and enqueue the chain with [`ChainBuilder::submit`].
+    ///
+    /// ```no_run
+    /// # use redis_task_graph::{TaskQueue, TaskType, ChainStatus};
+    /// # use std::time::Duration;
+    /// const PARSE: TaskType<String, Vec<u32>> = TaskType::new("parse");
+    /// const SUM: TaskType<Vec<u32>, u32> = TaskType::new("sum");
+    ///
+    /// # async fn run(queue: TaskQueue) -> redis_task_graph::Result<()> {
+    /// let chain = queue.chain(PARSE, &"1,2,3".to_string()).then(SUM).submit().await?;
+    /// let status = queue.wait_for_chain(&chain, Duration::from_secs(10)).await?;
+    /// assert_eq!(status, Some(ChainStatus::Completed(6)));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Steps whose types don't line up are rejected at compile time:
+    ///
+    /// ```compile_fail
+    /// # use redis_task_graph::{TaskQueue, TaskType};
+    /// const PARSE: TaskType<String, Vec<u32>> = TaskType::new("parse");
+    /// const SQUARE: TaskType<u32, u32> = TaskType::new("square");
+    /// # async fn run(queue: TaskQueue) {
+    /// queue.chain(PARSE, &"1,2,3".to_string()).then(SQUARE); // SQUARE needs u32, not Vec<u32>
+    /// # }
+    /// ```
+    pub fn chain<In: Serialize, Out>(
+        &self,
+        first: impl IntoTaskType<In, Out>,
+        input: &In,
+    ) -> ChainBuilder<'_, Out> {
+        ChainBuilder::new(self, first.into_name(), input)
+    }
+
+    /// Returns a chain's status, or `None` if it is unknown or its result has expired.
+    pub async fn chain_status<Out: DeserializeOwned>(
+        &self,
+        chain: &ChainId<Out>,
+    ) -> Result<Option<ChainStatus<Out>>> {
+        let mut conn = self.conn.clone();
+        let fields: HashMap<String, String> = conn.hgetall(self.keys.chain(&chain.uuid())).await?;
+        parse_status(fields)
+    }
+
+    /// Polls a chain's status until it finishes or `timeout` elapses, returning the last status.
+    pub async fn wait_for_chain<Out: DeserializeOwned>(
+        &self,
+        chain: &ChainId<Out>,
+        timeout: Duration,
+    ) -> Result<Option<ChainStatus<Out>>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let status = self.chain_status(chain).await?;
+            let finished = status.as_ref().is_none_or(ChainStatus::is_finished);
+            if finished || tokio::time::Instant::now() >= deadline {
+                return Ok(status);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     /// Returns up to `count` dead-lettered tasks, oldest first.

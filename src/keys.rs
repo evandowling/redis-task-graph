@@ -34,6 +34,11 @@ impl Keys {
         format!("{}:delayed", self.ns)
     }
 
+    /// Hash holding a chain's status and, once it finishes, its output or error.
+    pub(crate) fn chain(&self, chain_id: &uuid::Uuid) -> String {
+        format!("{}:chain:{}", self.ns, chain_id)
+    }
+
     /// Stream of tasks that exhausted their attempts or could not be decoded.
     pub(crate) fn dead(&self) -> String {
         format!("{}:dead", self.ns)
@@ -52,5 +57,7 @@ mod tests {
         assert_eq!(k.group(), "app:workers");
         assert_eq!(k.delayed(), "app:delayed");
         assert_eq!(k.dead(), "app:dead");
+        let id = uuid::Uuid::nil();
+        assert_eq!(k.chain(&id), format!("app:chain:{id}"));
     }
 }

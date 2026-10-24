@@ -461,3 +461,223 @@ async fn shutdown_waits_for_in_flight_tasks() {
     assert!(finished.load(Ordering::SeqCst));
     assert_eq!(t.xlen("slow").await, 0);
 }
+
+mod chains {
+    use super::*;
+    use redis_task_graph::{ChainStatus, TaskType};
+
+    const PARSE: TaskType<String, Vec<u32>> = TaskType::new("parse");
+    const SUM: TaskType<Vec<u32>, u32> = TaskType::new("sum");
+    const FORMAT: TaskType<u32, String> = TaskType::new("format");
+
+    fn register_parse(reg: &mut Registry) {
+        reg.register(PARSE, |s| async move {
+            s.split(',')
+                .map(|n| n.trim().parse::<u32>().map_err(Into::into))
+                .collect()
+        })
+        .unwrap();
+    }
+
+    fn register_sum(reg: &mut Registry) {
+        reg.register(SUM, |ns| async move { Ok(ns.iter().sum()) }).unwrap();
+    }
+
+    fn register_format(reg: &mut Registry) {
+        reg.register(FORMAT, |n| async move { Ok(format!("total={n}")) })
+            .unwrap();
+    }
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn steps_run_in_order_across_workers() {
+        let Some(t) = setup().await else { return };
+        // Each step's processor lives on a different worker, so every hand-off crosses workers.
+        let mut workers = Vec::new();
+        for register in [register_parse, register_sum, register_format] {
+            let mut reg = Registry::new();
+            register(&mut reg);
+            workers.push(fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap());
+        }
+
+        let chain = t
+            .queue
+            .chain(PARSE, &"1, 2, 3".to_string())
+            .then(SUM)
+            .then(FORMAT)
+            .submit()
+            .await
+            .unwrap();
+        let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
+        assert_eq!(status, Some(ChainStatus::Completed("total=6".to_string())));
+        for w in workers {
+            w.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn single_step_chain_records_output() {
+        let Some(t) = setup().await else { return };
+        let mut reg = Registry::new();
+        register_parse(&mut reg);
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        let chain = t.queue.chain(PARSE, &"4,5".to_string()).submit().await.unwrap();
+        let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
+        assert_eq!(status, Some(ChainStatus::Completed(vec![4, 5])));
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_step_fails_the_chain_and_stops_it() {
+        let Some(t) = setup().await else { return };
+        let formatted = Arc::new(AtomicUsize::new(0));
+        let mut reg = Registry::new();
+        register_parse(&mut reg);
+        register_sum(&mut reg);
+        let f = formatted.clone();
+        reg.register(FORMAT, move |n| {
+            let f = f.clone();
+            async move {
+                f.fetch_add(1, Ordering::SeqCst);
+                Ok(n.to_string())
+            }
+        })
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .max_attempts(2)
+            .spawn()
+            .await
+            .unwrap();
+
+        // "x" fails to parse on every attempt, so step 0 is dead-lettered.
+        let chain = t
+            .queue
+            .chain(PARSE, &"1,x".to_string())
+            .then(SUM)
+            .then(FORMAT)
+            .submit()
+            .await
+            .unwrap();
+        let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
+        worker.shutdown().await;
+
+        let Some(ChainStatus::Failed { step, error }) = status else {
+            panic!("expected failure, got {status:?}");
+        };
+        assert_eq!(step, 0);
+        assert!(error.contains("invalid digit"), "{error}");
+        assert_eq!(formatted.load(Ordering::SeqCst), 0, "later steps never run");
+
+        let dead = t.queue.dead_letters(10).await.unwrap();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].attempt, 2);
+        assert_eq!(dead[0].chain.as_ref().unwrap().chain_id, chain.uuid());
+    }
+
+    #[tokio::test]
+    async fn retried_step_keeps_its_place_in_the_chain() {
+        let Some(t) = setup().await else { return };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut reg = Registry::new();
+        register_parse(&mut reg);
+        register_format(&mut reg);
+        let c = calls.clone();
+        reg.register(SUM, move |ns| {
+            let c = c.clone();
+            async move {
+                if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err("transient".into());
+                }
+                Ok(ns.iter().sum())
+            }
+        })
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        let chain = t
+            .queue
+            .chain(PARSE, &"10,20".to_string())
+            .then(SUM)
+            .then(FORMAT)
+            .submit()
+            .await
+            .unwrap();
+        let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
+        worker.shutdown().await;
+        assert_eq!(status, Some(ChainStatus::Completed("total=30".to_string())));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn status_reports_progress_and_result_expires() {
+        let Some(mut t) = setup().await else { return };
+        let release = Arc::new(Notify::new());
+        let mut reg = Registry::new();
+        let r = release.clone();
+        reg.register(PARSE, move |s| {
+            let r = r.clone();
+            async move {
+                r.notified().await;
+                Ok(vec![s.len() as u32])
+            }
+        })
+        .unwrap();
+        register_sum(&mut reg);
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        let chain = t
+            .queue
+            .chain(PARSE, &"abc".to_string())
+            .then(SUM)
+            .result_ttl(Duration::from_secs(30))
+            .submit()
+            .await
+            .unwrap();
+        assert_eq!(
+            t.queue.chain_status(&chain).await.unwrap(),
+            Some(ChainStatus::Running { step: 0, total: 2 })
+        );
+
+        release.notify_one();
+        let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
+        worker.shutdown().await;
+        assert_eq!(status, Some(ChainStatus::Completed(3)));
+
+        let key = format!("{}:chain:{}", t.queue.namespace(), chain.uuid());
+        let ttl: i64 = t.conn.ttl(&key).await.unwrap();
+        assert!((1..=30).contains(&ttl), "ttl = {ttl}");
+    }
+
+    #[tokio::test]
+    async fn untyped_steps_can_be_chained_and_output_read_as_json() {
+        let Some(t) = setup().await else { return };
+        let mut reg = Registry::new();
+        register_parse(&mut reg);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        reg.register("record", move |ns: Vec<u32>| {
+            let s = s.clone();
+            async move {
+                s.lock().unwrap().extend(ns);
+                Ok(())
+            }
+        })
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        let chain = t
+            .queue
+            .chain(PARSE, &"7,8".to_string())
+            .then("record")
+            .submit()
+            .await
+            .unwrap()
+            .cast::<serde_json::Value>();
+        let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
+        worker.shutdown().await;
+        assert_eq!(status, Some(ChainStatus::Completed(serde_json::Value::Null)));
+        assert_eq!(*seen.lock().unwrap(), vec![7, 8]);
+    }
+}

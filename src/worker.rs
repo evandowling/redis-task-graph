@@ -13,7 +13,7 @@ use crate::client::TaskQueue;
 use crate::error::{Error, Result};
 use crate::registry::{HandlerError, Registry};
 use crate::scripts;
-use crate::task::{PAYLOAD_FIELD, TaskEnvelope};
+use crate::task::{ChainLink, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
 
 /// Tuning knobs for a [`Worker`].
 #[derive(Debug, Clone)]
@@ -405,7 +405,7 @@ async fn promote_loop(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
 }
 
 enum Outcome {
-    Succeeded,
+    Succeeded(serde_json::Value),
     Failed(String),
     /// Not retryable: dead-letter immediately.
     Fatal(String),
@@ -430,56 +430,20 @@ async fn process(
             .expect("semaphore is never closed"),
     };
 
+    let id = &entry.id;
     let payload: String = entry.get(PAYLOAD_FIELD).unwrap_or_default();
-    let (envelope, outcome) = match serde_json::from_str::<TaskEnvelope>(&payload) {
+    let finalized = match serde_json::from_str::<TaskEnvelope>(&payload) {
         Ok(envelope) => {
             let outcome = run(&inner, &envelope).await;
-            (Some(envelope), outcome)
+            heartbeat.abort();
+            finalize(&inner, &stream, id, envelope, outcome).await
         }
-        Err(e) => (None, Outcome::Fatal(format!("invalid task payload: {e}"))),
-    };
-    heartbeat.abort();
-
-    let id = &entry.id;
-    let finalized = match (outcome, envelope) {
-        (Outcome::Succeeded, _) => {
-            let (inner, stream) = (&inner, &stream);
-            with_retries(inner.queue.conn.clone(), |mut conn| async move {
-                scripts::ACK
-                    .key(stream)
-                    .arg(&inner.group)
-                    .arg(id)
-                    .arg(inner.consumer())
-                    .invoke_async::<i64>(&mut conn)
-                    .await
-            })
-            .await
-        }
-        (Outcome::Failed(err), Some(mut env)) => {
-            env.attempt += 1;
-            env.last_error = Some(err.clone());
-            if env.attempt < inner.config.max_attempts {
-                let delay = backoff(
-                    env.attempt,
-                    inner.config.backoff_base,
-                    inner.config.backoff_max,
-                );
-                warn!(task = %env.id, attempt = env.attempt, error = %err, "task failed; retrying");
-                retry_or_dead(&inner, &stream, id, "retry", &env, delay).await
-            } else {
-                error!(task = %env.id, attempt = env.attempt, error = %err, "task failed; dead-lettering");
-                retry_or_dead(&inner, &stream, id, "dead", &env, Duration::ZERO).await
-            }
-        }
-        (Outcome::Fatal(err), Some(mut env)) => {
-            error!(task = %env.id, error = %err, "task cannot be processed; dead-lettering");
-            env.last_error = Some(err);
-            retry_or_dead(&inner, &stream, id, "dead", &env, Duration::ZERO).await
-        }
-        (Outcome::Fatal(err) | Outcome::Failed(err), None) => {
-            error!(stream, id, error = %err, "dead-lettering undecodable entry");
+        Err(e) => {
+            heartbeat.abort();
+            error!(stream, id, error = %e, "dead-lettering undecodable entry");
+            let err = format!("invalid task payload: {e}");
             let raw = serde_json::json!({ "raw": payload, "last_error": err }).to_string();
-            retry_or_dead_raw(&inner, &stream, id, "dead", raw, Duration::ZERO).await
+            retry_or_dead_raw(&inner, &stream, id, "dead", raw, Duration::ZERO, None).await
         }
     };
 
@@ -490,6 +454,116 @@ async fn process(
     }
 }
 
+/// Records a task's outcome: ack it (advancing or completing its chain), retry it, or
+/// dead-letter it.
+async fn finalize(
+    inner: &Inner,
+    stream: &str,
+    id: &str,
+    mut env: TaskEnvelope,
+    outcome: Outcome,
+) -> redis::RedisResult<i64> {
+    match outcome {
+        Outcome::Succeeded(output) => succeed(inner, stream, id, env, output).await,
+        Outcome::Failed(err) => {
+            env.attempt += 1;
+            env.last_error = Some(err.clone());
+            if env.attempt < inner.config.max_attempts {
+                let delay = backoff(
+                    env.attempt,
+                    inner.config.backoff_base,
+                    inner.config.backoff_max,
+                );
+                warn!(task = %env.id, attempt = env.attempt, error = %err, "task failed; retrying");
+                retry_or_dead(inner, stream, id, "retry", &env, delay).await
+            } else {
+                error!(task = %env.id, attempt = env.attempt, error = %err, "task failed; dead-lettering");
+                retry_or_dead(inner, stream, id, "dead", &env, Duration::ZERO).await
+            }
+        }
+        Outcome::Fatal(err) => {
+            error!(task = %env.id, error = %err, "task cannot be processed; dead-lettering");
+            env.last_error = Some(err);
+            retry_or_dead(inner, stream, id, "dead", &env, Duration::ZERO).await
+        }
+    }
+}
+
+async fn succeed(
+    inner: &Inner,
+    stream: &str,
+    id: &str,
+    env: TaskEnvelope,
+    output: serde_json::Value,
+) -> redis::RedisResult<i64> {
+    let keys = &inner.queue.keys;
+    let conn = inner.queue.conn.clone();
+    let Some(link) = env.chain else {
+        return with_retries(conn, |mut conn| async move {
+            scripts::ACK
+                .key(stream)
+                .arg(&inner.group)
+                .arg(id)
+                .arg(inner.consumer())
+                .invoke_async::<i64>(&mut conn)
+                .await
+        })
+        .await;
+    };
+    let chain_key = keys.chain(&link.chain_id);
+
+    let Some((next_type, rest)) = link.remaining.split_first() else {
+        let output = output.to_string();
+        let (chain_key, output) = (&chain_key, &output);
+        return with_retries(conn, |mut conn| async move {
+            scripts::COMPLETE
+                .key(stream)
+                .key(chain_key)
+                .arg(&inner.group)
+                .arg(id)
+                .arg(inner.consumer())
+                .arg(output)
+                .arg(link.result_ttl_secs)
+                .invoke_async::<i64>(&mut conn)
+                .await
+        })
+        .await;
+    };
+
+    let next_step = link.step + 1;
+    let next = TaskEnvelope {
+        id: TaskId::new(),
+        processor_type: next_type.clone(),
+        context: output,
+        attempt: 0,
+        enqueued_at: now_millis(),
+        last_error: None,
+        chain: Some(ChainLink {
+            step: next_step,
+            remaining: rest.to_vec(),
+            ..link.clone()
+        }),
+    };
+    let next_payload = serde_json::to_string(&next).expect("envelope serializes");
+    let next_stream = keys.stream(next_type);
+    let (chain_key, next_stream, next_payload) = (&chain_key, &next_stream, &next_payload);
+    with_retries(conn, |mut conn| async move {
+        scripts::ADVANCE
+            .key(stream)
+            .key(next_stream)
+            .key(chain_key)
+            .arg(&inner.group)
+            .arg(id)
+            .arg(inner.consumer())
+            .arg(next_payload)
+            .arg(PAYLOAD_FIELD)
+            .arg(next_step)
+            .invoke_async::<i64>(&mut conn)
+            .await
+    })
+    .await
+}
+
 async fn run(inner: &Inner, envelope: &TaskEnvelope) -> Outcome {
     let Some(handler) = inner.registry.get(&envelope.processor_type).cloned() else {
         return Outcome::Fatal(format!(
@@ -498,9 +572,9 @@ async fn run(inner: &Inner, envelope: &TaskEnvelope) -> Outcome {
         ));
     };
     match tokio::spawn(handler(envelope.context.clone())).await {
-        Ok(Ok(())) => Outcome::Succeeded,
+        Ok(Ok(output)) => Outcome::Succeeded(output),
         Ok(Err(HandlerError::Failed(e))) => Outcome::Failed(e),
-        Ok(Err(HandlerError::Decode(e))) => Outcome::Fatal(format!("invalid context: {e}")),
+        Ok(Err(HandlerError::Fatal(e))) => Outcome::Fatal(e),
         Err(join) => Outcome::Failed(panic_message(join)),
     }
 }
@@ -528,9 +602,15 @@ async fn retry_or_dead(
     delay: Duration,
 ) -> redis::RedisResult<i64> {
     let payload = serde_json::to_string(env).expect("envelope serializes");
-    retry_or_dead_raw(inner, stream, id, mode, payload, delay).await
+    let chain = env
+        .chain
+        .as_ref()
+        .map(|link| (link, env.last_error.as_deref().unwrap_or_default()));
+    retry_or_dead_raw(inner, stream, id, mode, payload, delay, chain).await
 }
 
+/// `chain` is the task's chain link and error message, used to mark the chain failed when the
+/// task is dead-lettered.
 async fn retry_or_dead_raw(
     inner: &Inner,
     stream: &str,
@@ -538,14 +618,17 @@ async fn retry_or_dead_raw(
     mode: &str,
     payload: String,
     delay: Duration,
+    chain: Option<(&ChainLink, &str)>,
 ) -> redis::RedisResult<i64> {
     let keys = &inner.queue.keys;
     let (delayed, dead) = (keys.delayed(), keys.dead());
+    let chain_key = chain.map(|(link, _)| keys.chain(&link.chain_id));
     let delay_ms = delay.as_millis() as u64;
     with_retries(inner.queue.conn.clone(), |mut conn| {
-        let (delayed, dead, payload) = (&delayed, &dead, &payload);
+        let (delayed, dead, payload, chain_key) = (&delayed, &dead, &payload, &chain_key);
         async move {
-            scripts::RETRY_OR_DEAD
+            let mut invocation = scripts::RETRY_OR_DEAD.prepare_invoke();
+            invocation
                 .key(stream)
                 .key(delayed)
                 .key(dead)
@@ -556,9 +639,15 @@ async fn retry_or_dead_raw(
                 .arg(payload)
                 .arg(delay_ms)
                 .arg(inner.config.dead_letter_max_len)
-                .arg(PAYLOAD_FIELD)
-                .invoke_async::<i64>(&mut conn)
-                .await
+                .arg(PAYLOAD_FIELD);
+            if let (Some(key), Some((link, error))) = (chain_key, chain) {
+                invocation
+                    .key(key)
+                    .arg(link.step)
+                    .arg(error)
+                    .arg(link.result_ttl_secs);
+            }
+            invocation.invoke_async::<i64>(&mut conn).await
         }
     })
     .await

@@ -33,10 +33,43 @@ return 1
     )
 });
 
-/// KEYS: stream, delayed, dead.
-/// ARGV: group, id, consumer, mode ('retry' | 'dead'), payload, delay_ms, dead_max_len, field.
+/// KEYS: stream, next_stream, chain. ARGV: group, id, consumer, next_payload, field, next_step.
+/// Completes one chain step and enqueues the next one. Returns 1 on success, 0 if the lease was
+/// lost.
+pub(crate) static ADVANCE: LazyLock<Script> = LazyLock::new(|| {
+    with_owned(
+        r"
+if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+redis.call('XDEL', KEYS[1], ARGV[2])
+redis.call('XADD', KEYS[2], '*', ARGV[5], ARGV[4])
+redis.call('HSET', KEYS[3], 'state', 'running', 'step', ARGV[6])
+return 1
+",
+    )
+});
+
+/// KEYS: stream, chain. ARGV: group, id, consumer, output, ttl_secs.
+/// Completes a chain's final step and records its output. Returns 1 on success, 0 if the lease
+/// was lost.
+pub(crate) static COMPLETE: LazyLock<Script> = LazyLock::new(|| {
+    with_owned(
+        r"
+if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+redis.call('XDEL', KEYS[1], ARGV[2])
+redis.call('HSET', KEYS[2], 'state', 'completed', 'output', ARGV[4])
+redis.call('EXPIRE', KEYS[2], ARGV[5])
+return 1
+",
+    )
+});
+
+/// KEYS: stream, delayed, dead, and for chain steps also the chain key.
+/// ARGV: group, id, consumer, mode ('retry' | 'dead'), payload, delay_ms, dead_max_len, field,
+/// and for chain steps also step, error, ttl_secs.
 /// Removes the entry and either schedules `payload` for retry or appends it to the dead-letter
-/// stream. Returns 1 on success, 0 if the lease was lost.
+/// stream, marking the chain failed. Returns 1 on success, 0 if the lease was lost.
 pub(crate) static RETRY_OR_DEAD: LazyLock<Script> = LazyLock::new(|| {
     with_owned(
         r"
@@ -49,6 +82,10 @@ if ARGV[4] == 'retry' then
   redis.call('ZADD', KEYS[2], now + tonumber(ARGV[6]), ARGV[5])
 else
   redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[7], '*', ARGV[8], ARGV[5])
+  if KEYS[4] then
+    redis.call('HSET', KEYS[4], 'state', 'failed', 'step', ARGV[9], 'error', ARGV[10])
+    redis.call('EXPIRE', KEYS[4], ARGV[11])
+  end
 end
 return 1
 ",
