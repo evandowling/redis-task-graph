@@ -1,0 +1,23 @@
+//! A Redis-backed task queue with typed, async task processors.
+//!
+//! Tasks are submitted with a processor type and a serializable context. A background
+//! [`Worker`] claims pending tasks from Redis Streams and calls the processor registered for
+//! each task's type with its deserialized context.
+//!
+//! Delivery is at-least-once and normally exactly-once: each task is claimed by a single worker
+//! under a lease kept alive by heartbeats. If a worker crashes or stalls past its lease, another
+//! worker reclaims the task, so processors with side effects should be idempotent.
+
+mod client;
+mod error;
+mod keys;
+mod registry;
+mod scripts;
+mod task;
+mod worker;
+
+pub use client::TaskQueue;
+pub use error::{BoxError, Error, Result};
+pub use registry::Registry;
+pub use task::{TaskEnvelope, TaskId};
+pub use worker::{Worker, WorkerConfig, WorkerHandle};
