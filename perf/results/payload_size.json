@@ -1,0 +1,123 @@
+{
+  "id": "payload_size",
+  "title": "Throughput vs. context size",
+  "subtitle": "No-op steps, concurrency 16; a chain passes the full payload to every step through Redis",
+  "x_label": "Context size",
+  "y_label": "Steps completed / s",
+  "x_scale": "Log2",
+  "y_scale": "Log10",
+  "x_format": "Bytes",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "task",
+      "reference": false,
+      "points": [
+        [
+          64.0,
+          39051.44051001182
+        ],
+        [
+          1024.0,
+          36525.07720488194
+        ],
+        [
+          8192.0,
+          26827.087761123646
+        ],
+        [
+          65536.0,
+          9659.739451168318
+        ],
+        [
+          262144.0,
+          2151.775845475597
+        ],
+        [
+          524288.0,
+          1073.7714544569903
+        ]
+      ]
+    },
+    {
+      "name": "4-step chain",
+      "reference": false,
+      "points": [
+        [
+          64.0,
+          31337.843893664427
+        ],
+        [
+          1024.0,
+          28898.643786647095
+        ],
+        [
+          8192.0,
+          21454.152617278294
+        ],
+        [
+          65536.0,
+          4994.244913088433
+        ],
+        [
+          262144.0,
+          554.2775176594765
+        ],
+        [
+          524288.0,
+          399.85942442110195
+        ]
+      ]
+    }
+  ],
+  "notes": [
+    [
+      "task 64B MB/s",
+      "2.4"
+    ],
+    [
+      "task 1024B MB/s",
+      "35.7"
+    ],
+    [
+      "task 8192B MB/s",
+      "209.6"
+    ],
+    [
+      "task 65536B MB/s",
+      "603.7"
+    ],
+    [
+      "task 262144B MB/s",
+      "537.9"
+    ],
+    [
+      "task 524288B MB/s",
+      "536.9"
+    ],
+    [
+      "4-step chain 64B MB/s",
+      "1.9"
+    ],
+    [
+      "4-step chain 1024B MB/s",
+      "28.2"
+    ],
+    [
+      "4-step chain 8192B MB/s",
+      "167.6"
+    ],
+    [
+      "4-step chain 65536B MB/s",
+      "312.1"
+    ],
+    [
+      "4-step chain 262144B MB/s",
+      "138.6"
+    ],
+    [
+      "4-step chain 524288B MB/s",
+      "199.9"
+    ]
+  ]
+}

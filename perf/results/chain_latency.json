@@ -1,0 +1,177 @@
+{
+  "id": "chain_latency",
+  "title": "Unloaded latency vs. chain length (no-op steps)",
+  "subtitle": "One job in flight at a time on an idle worker; median of repeated runs",
+  "x_label": "Steps",
+  "y_label": "Median submit-to-finish latency (ms)",
+  "x_scale": "Log2",
+  "y_scale": "Linear",
+  "x_format": "Number",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "chain",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          0.331
+        ],
+        [
+          2.0,
+          0.58
+        ],
+        [
+          4.0,
+          1.058
+        ],
+        [
+          8.0,
+          1.58
+        ],
+        [
+          16.0,
+          2.592
+        ],
+        [
+          32.0,
+          4.424
+        ]
+      ]
+    },
+    {
+      "name": "DIY chain (step submits next)",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          0.322
+        ],
+        [
+          2.0,
+          0.499
+        ],
+        [
+          4.0,
+          0.957
+        ],
+        [
+          8.0,
+          1.405
+        ],
+        [
+          16.0,
+          2.462
+        ],
+        [
+          32.0,
+          4.003
+        ]
+      ]
+    },
+    {
+      "name": "independent tasks (parallel)",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          0.392
+        ],
+        [
+          2.0,
+          0.492
+        ],
+        [
+          4.0,
+          0.871
+        ],
+        [
+          8.0,
+          1.397
+        ],
+        [
+          16.0,
+          2.149
+        ],
+        [
+          32.0,
+          3.658
+        ]
+      ]
+    }
+  ],
+  "notes": [
+    [
+      "chain len=1 p90_ms",
+      "0.48"
+    ],
+    [
+      "chain len=2 p90_ms",
+      "0.75"
+    ],
+    [
+      "chain len=4 p90_ms",
+      "1.41"
+    ],
+    [
+      "chain len=8 p90_ms",
+      "2.04"
+    ],
+    [
+      "chain len=16 p90_ms",
+      "3.12"
+    ],
+    [
+      "chain len=32 p90_ms",
+      "5.09"
+    ],
+    [
+      "DIY chain (step submits next) len=1 p90_ms",
+      "0.43"
+    ],
+    [
+      "DIY chain (step submits next) len=2 p90_ms",
+      "0.70"
+    ],
+    [
+      "DIY chain (step submits next) len=4 p90_ms",
+      "1.39"
+    ],
+    [
+      "DIY chain (step submits next) len=8 p90_ms",
+      "1.75"
+    ],
+    [
+      "DIY chain (step submits next) len=16 p90_ms",
+      "2.79"
+    ],
+    [
+      "DIY chain (step submits next) len=32 p90_ms",
+      "5.01"
+    ],
+    [
+      "independent tasks (parallel) len=1 p90_ms",
+      "0.50"
+    ],
+    [
+      "independent tasks (parallel) len=2 p90_ms",
+      "0.64"
+    ],
+    [
+      "independent tasks (parallel) len=4 p90_ms",
+      "1.10"
+    ],
+    [
+      "independent tasks (parallel) len=8 p90_ms",
+      "1.88"
+    ],
+    [
+      "independent tasks (parallel) len=16 p90_ms",
+      "2.80"
+    ],
+    [
+      "independent tasks (parallel) len=32 p90_ms",
+      "4.37"
+    ]
+  ]
+}

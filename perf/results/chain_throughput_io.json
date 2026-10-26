@@ -1,0 +1,104 @@
+{
+  "id": "chain_throughput_io",
+  "title": "Step throughput under load vs. chain length (10 ms I/O wait per step)",
+  "subtitle": "One worker, concurrency 256; same total number of steps at every point",
+  "x_label": "Steps per job",
+  "y_label": "Steps completed / s",
+  "x_scale": "Log2",
+  "y_scale": "Linear",
+  "x_format": "Number",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "independent tasks",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          21289.777287639794
+        ],
+        [
+          2.0,
+          21403.575110495956
+        ],
+        [
+          4.0,
+          21367.90185010417
+        ],
+        [
+          8.0,
+          20917.293023385533
+        ],
+        [
+          16.0,
+          21253.53339992774
+        ],
+        [
+          32.0,
+          20735.659736117996
+        ]
+      ]
+    },
+    {
+      "name": "chain",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          20234.722784297857
+        ],
+        [
+          2.0,
+          20701.162163243844
+        ],
+        [
+          4.0,
+          21238.66740105259
+        ],
+        [
+          8.0,
+          21298.846241499097
+        ],
+        [
+          16.0,
+          21523.443693595127
+        ],
+        [
+          32.0,
+          21761.834775824216
+        ]
+      ]
+    },
+    {
+      "name": "ideal: 256 ÷ wait",
+      "reference": true,
+      "points": [
+        [
+          1.0,
+          24884.084878058264
+        ],
+        [
+          2.0,
+          24884.084878058264
+        ],
+        [
+          4.0,
+          24884.084878058264
+        ],
+        [
+          8.0,
+          24884.084878058264
+        ],
+        [
+          16.0,
+          24884.084878058264
+        ],
+        [
+          32.0,
+          24884.084878058264
+        ]
+      ]
+    }
+  ],
+  "notes": []
+}

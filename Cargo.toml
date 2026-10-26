@@ -15,4 +15,10 @@ tracing = "0.1.44"
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series", "point_series"] }
 tracing-subscriber = "0.3.23"
+
+[[bench]]
+name = "load"
+path = "benches/load/main.rs"
+harness = false

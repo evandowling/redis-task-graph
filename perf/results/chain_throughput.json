@@ -1,0 +1,104 @@
+{
+  "id": "chain_throughput",
+  "title": "Step throughput under load vs. chain length (no-op steps)",
+  "subtitle": "Same total number of steps at every point; one worker, concurrency 64; median of 3",
+  "x_label": "Steps per job",
+  "y_label": "Steps completed / s",
+  "x_scale": "Log2",
+  "y_scale": "Linear",
+  "x_format": "Number",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "independent tasks",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          57290.311492197776
+        ],
+        [
+          2.0,
+          57601.75109323323
+        ],
+        [
+          4.0,
+          57301.66461335702
+        ],
+        [
+          8.0,
+          57176.209931984136
+        ],
+        [
+          16.0,
+          57635.78029240553
+        ],
+        [
+          32.0,
+          57881.25660208083
+        ]
+      ]
+    },
+    {
+      "name": "chain",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          46774.96370067921
+        ],
+        [
+          2.0,
+          46712.60072404531
+        ],
+        [
+          4.0,
+          45105.99909788002
+        ],
+        [
+          8.0,
+          46086.04648929939
+        ],
+        [
+          16.0,
+          48185.32074357981
+        ],
+        [
+          32.0,
+          47423.613402703544
+        ]
+      ]
+    },
+    {
+      "name": "DIY chain (step submits next)",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          58444.641965688126
+        ],
+        [
+          2.0,
+          54701.85211354281
+        ],
+        [
+          4.0,
+          53986.692280352894
+        ],
+        [
+          8.0,
+          53643.8717464433
+        ],
+        [
+          16.0,
+          52523.88195257531
+        ],
+        [
+          32.0,
+          50794.72581430295
+        ]
+      ]
+    }
+  ],
+  "notes": []
+}

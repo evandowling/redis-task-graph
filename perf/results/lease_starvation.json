@@ -1,0 +1,91 @@
+{
+  "id": "lease_starvation",
+  "title": "Duplicate executions when CPU work starves heartbeats",
+  "subtitle": "2 workers, 600 ms CPU tasks, 300 ms lease (heartbeat every 100 ms)",
+  "x_label": "Concurrency limit per worker (4 runtime threads each)",
+  "y_label": "Duplicate executions (% of tasks)",
+  "x_scale": "Log2",
+  "y_scale": "Linear",
+  "x_format": "Number",
+  "y_format": "Percent",
+  "series": [
+    {
+      "name": "compute on runtime",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          0.0
+        ],
+        [
+          2.0,
+          0.0
+        ],
+        [
+          4.0,
+          18.75
+        ],
+        [
+          8.0,
+          15.625
+        ]
+      ]
+    },
+    {
+      "name": "spawn_blocking",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          0.0
+        ],
+        [
+          2.0,
+          0.0
+        ],
+        [
+          4.0,
+          0.0
+        ],
+        [
+          8.0,
+          0.0
+        ]
+      ]
+    }
+  ],
+  "notes": [
+    [
+      "compute on runtime c=1 executions/tasks",
+      "32/32"
+    ],
+    [
+      "compute on runtime c=2 executions/tasks",
+      "32/32"
+    ],
+    [
+      "compute on runtime c=4 executions/tasks",
+      "38/32"
+    ],
+    [
+      "compute on runtime c=8 executions/tasks",
+      "37/32"
+    ],
+    [
+      "spawn_blocking c=1 executions/tasks",
+      "32/32"
+    ],
+    [
+      "spawn_blocking c=2 executions/tasks",
+      "32/32"
+    ],
+    [
+      "spawn_blocking c=4 executions/tasks",
+      "32/32"
+    ],
+    [
+      "spawn_blocking c=8 executions/tasks",
+      "32/32"
+    ]
+  ]
+}

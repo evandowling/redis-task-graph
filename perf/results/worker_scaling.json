@@ -1,0 +1,80 @@
+{
+  "id": "worker_scaling",
+  "title": "Throughput vs. number of workers",
+  "subtitle": "No-op tasks are bound by Redis round trips; 10 ms async waits by concurrency",
+  "x_label": "Workers (2 runtime threads, concurrency 32 each)",
+  "y_label": "Tasks completed / s",
+  "x_scale": "Log2",
+  "y_scale": "Linear",
+  "x_format": "Number",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "no-op",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          57632.34788422045
+        ],
+        [
+          2.0,
+          63491.79474372596
+        ],
+        [
+          4.0,
+          72184.61938253276
+        ],
+        [
+          8.0,
+          67286.6005463672
+        ]
+      ]
+    },
+    {
+      "name": "10 ms async wait",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          2973.059227554319
+        ],
+        [
+          2.0,
+          5955.5285359516865
+        ],
+        [
+          4.0,
+          11350.591782020208
+        ],
+        [
+          8.0,
+          20032.9341437323
+        ]
+      ]
+    },
+    {
+      "name": "ideal: workers × 32 ÷ wait",
+      "reference": true,
+      "points": [
+        [
+          1.0,
+          3115.295125536658
+        ],
+        [
+          2.0,
+          6230.590251073316
+        ],
+        [
+          4.0,
+          12461.180502146632
+        ],
+        [
+          8.0,
+          24922.361004293263
+        ]
+      ]
+    }
+  ],
+  "notes": []
+}

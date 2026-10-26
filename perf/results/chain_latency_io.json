@@ -1,0 +1,153 @@
+{
+  "id": "chain_latency_io",
+  "title": "Unloaded latency vs. chain length (5 ms I/O wait per step)",
+  "subtitle": "A chain pays every step's wait in sequence; independent tasks wait in parallel",
+  "x_label": "Steps",
+  "y_label": "Median submit-to-finish latency (ms)",
+  "x_scale": "Log2",
+  "y_scale": "Log10",
+  "x_format": "Number",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "chain",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          5.666
+        ],
+        [
+          2.0,
+          11.395
+        ],
+        [
+          4.0,
+          22.395
+        ],
+        [
+          8.0,
+          45.089
+        ],
+        [
+          16.0,
+          89.819
+        ],
+        [
+          32.0,
+          180.063
+        ]
+      ]
+    },
+    {
+      "name": "independent tasks (parallel)",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          5.663
+        ],
+        [
+          2.0,
+          5.732
+        ],
+        [
+          4.0,
+          6.18
+        ],
+        [
+          8.0,
+          6.549
+        ],
+        [
+          16.0,
+          7.225
+        ],
+        [
+          32.0,
+          8.369
+        ]
+      ]
+    },
+    {
+      "name": "steps × 5 ms",
+      "reference": true,
+      "points": [
+        [
+          1.0,
+          5.0
+        ],
+        [
+          2.0,
+          10.0
+        ],
+        [
+          4.0,
+          20.0
+        ],
+        [
+          8.0,
+          40.0
+        ],
+        [
+          16.0,
+          80.0
+        ],
+        [
+          32.0,
+          160.0
+        ]
+      ]
+    }
+  ],
+  "notes": [
+    [
+      "chain len=1 p90_ms",
+      "5.83"
+    ],
+    [
+      "chain len=2 p90_ms",
+      "11.62"
+    ],
+    [
+      "chain len=4 p90_ms",
+      "22.89"
+    ],
+    [
+      "chain len=8 p90_ms",
+      "45.63"
+    ],
+    [
+      "chain len=16 p90_ms",
+      "90.87"
+    ],
+    [
+      "chain len=32 p90_ms",
+      "181.68"
+    ],
+    [
+      "independent tasks (parallel) len=1 p90_ms",
+      "5.87"
+    ],
+    [
+      "independent tasks (parallel) len=2 p90_ms",
+      "5.99"
+    ],
+    [
+      "independent tasks (parallel) len=4 p90_ms",
+      "6.38"
+    ],
+    [
+      "independent tasks (parallel) len=8 p90_ms",
+      "6.82"
+    ],
+    [
+      "independent tasks (parallel) len=16 p90_ms",
+      "7.78"
+    ],
+    [
+      "independent tasks (parallel) len=32 p90_ms",
+      "8.88"
+    ]
+  ]
+}

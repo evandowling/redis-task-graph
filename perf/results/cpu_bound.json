@@ -1,0 +1,125 @@
+{
+  "id": "cpu_bound",
+  "title": "CPU-bound tasks (5 ms compute) vs. concurrency",
+  "subtitle": "One worker, 16 runtime threads, 16 hardware threads",
+  "x_label": "Concurrency limit",
+  "y_label": "Tasks completed / s",
+  "x_scale": "Log2",
+  "y_scale": "Linear",
+  "x_format": "Number",
+  "y_format": "Number",
+  "series": [
+    {
+      "name": "compute on runtime",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          152.24426313167666
+        ],
+        [
+          2.0,
+          296.4043192037394
+        ],
+        [
+          4.0,
+          555.9709894337714
+        ],
+        [
+          8.0,
+          1028.0403135728563
+        ],
+        [
+          16.0,
+          1622.6953415864973
+        ],
+        [
+          32.0,
+          1665.4460335112722
+        ],
+        [
+          64.0,
+          1654.036717961102
+        ]
+      ]
+    },
+    {
+      "name": "spawn_blocking",
+      "reference": false,
+      "points": [
+        [
+          1.0,
+          186.9180540036165
+        ],
+        [
+          2.0,
+          360.50352247991816
+        ],
+        [
+          4.0,
+          689.8457125571581
+        ],
+        [
+          8.0,
+          1321.3875494240235
+        ],
+        [
+          16.0,
+          2134.761631182036
+        ],
+        [
+          32.0,
+          2187.426345253531
+        ],
+        [
+          64.0,
+          2182.2601887000387
+        ]
+      ]
+    },
+    {
+      "name": "ideal: min(concurrency, 16) ÷ 5 ms",
+      "reference": true,
+      "points": [
+        [
+          1.0,
+          200.0
+        ],
+        [
+          2.0,
+          400.0
+        ],
+        [
+          4.0,
+          800.0
+        ],
+        [
+          8.0,
+          1600.0
+        ],
+        [
+          16.0,
+          3200.0
+        ],
+        [
+          32.0,
+          3200.0
+        ],
+        [
+          64.0,
+          3200.0
+        ]
+      ]
+    }
+  ],
+  "notes": [
+    [
+      "burn_iterations_for_5ms",
+      "3262090"
+    ],
+    [
+      "hardware_threads",
+      "16"
+    ]
+  ]
+}
