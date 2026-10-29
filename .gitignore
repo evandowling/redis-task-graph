@@ -1,1 +1,6 @@
 /target
+
+# Local OpenObserve install, data and credentials
+/monitoring/openobserve/
+/monitoring/data/
+/monitoring/.env

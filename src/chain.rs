@@ -169,6 +169,8 @@ impl<'q, Out> ChainBuilder<'q, Out> {
             .ignore()
             .query_async(&mut conn)
             .await?;
+        crate::telemetry::task_submitted(&envelope.processor_type);
+        crate::telemetry::chain_submitted(&envelope.processor_type);
         Ok(ChainId::from_uuid(chain_id))
     }
 }

@@ -3,8 +3,9 @@
 # checkout, in A B B A order, so slow drift in machine speed (heat, background load) affects
 # both sides equally. Then merges each side's rounds and writes perf/comparison.md.
 #
-# usage: [ROUNDS=n] perf/ab.sh <baseline-checkout> <work-dir> <scenario>...
-#   Each round runs A B B A; ROUNDS (default 1) repeats it.
+# usage: [ROUNDS=n] [CAND_CARGO_ARGS=..] [CAND_RUN_ARGS=..] perf/ab.sh <baseline-checkout> <work-dir> <scenario>...
+#   Each round runs A B B A; ROUNDS (default 1) repeats it. CAND_CARGO_ARGS and CAND_RUN_ARGS add
+#   cargo and harness arguments for the candidate only, e.g. "--features otel" and "--otel".
 #   e.g. git worktree add ../rtg-baseline HEAD
 #        perf/ab.sh ../rtg-baseline /tmp/ab consume_throughput submit_throughput
 set -euo pipefail
@@ -16,8 +17,10 @@ candidate=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$work"
 
 run() { # <side> <checkout> <round> <scenario>
+    local cargo_args="" run_args=""
+    if [ "$1" = cand ]; then cargo_args=${CAND_CARGO_ARGS:-}; run_args=${CAND_RUN_ARGS:-}; fi
     echo "== $1 round $3: $4"
-    (cd "$2" && cargo bench -q --bench load -- "$4" 2>&1 | grep -E "warning|timed out" || true)
+    (cd "$2" && cargo bench -q --bench load $cargo_args -- $run_args "$4" 2>&1 | grep -E "warning|timed out" || true)
     mkdir -p "$work/$1/r$3"
     cp "$2/perf/results/$4.json" "$work/$1/r$3/"
 }

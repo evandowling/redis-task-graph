@@ -75,6 +75,7 @@ impl TaskQueue {
                 &[(PAYLOAD_FIELD, payload)],
             )
             .await?;
+        crate::telemetry::task_submitted(&envelope.processor_type);
         Ok(envelope.id)
     }
 

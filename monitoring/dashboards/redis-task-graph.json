@@ -1,0 +1,696 @@
+{
+    "version":  8,
+    "title":  "redis-task-graph",
+    "description":  "Throughput, latency, pushback and queue health for redis-task-graph workers.",
+    "tabs":  [
+                 {
+                     "tabId":  "default",
+                     "name":  "Default",
+                     "panels":  [
+                                    {
+                                        "id":  "panel_1",
+                                        "type":  "line",
+                                        "title":  "Task throughput by outcome",
+                                        "description":  "Executions per second that finished as success, retry, dead letter, or lost lease.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "sum by (outcome) (rate(rtg_tasks_finished[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{outcome}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  0,
+                                                       "y":  0,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  1
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_2",
+                                        "type":  "line",
+                                        "title":  "Successful tasks by processor type",
+                                        "description":  "Successful executions per second, per processor type.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "sum by (processor_type) (rate(rtg_tasks_finished{outcome=\"success\"}[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{processor_type}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  24,
+                                                       "y":  0,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  2
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_3",
+                                        "type":  "line",
+                                        "title":  "Queue time p50 and p99",
+                                        "description":  "Time from submission until the processor starts, including retry backoff.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "seconds",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "histogram_quantile(0.99, sum by (le, processor_type) (rate(rtg_task_queue_time_bucket[1m])))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{processor_type} p99"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "histogram_quantile(0.5, sum by (le, processor_type) (rate(rtg_task_queue_time_bucket[1m])))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{processor_type} p50"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  0,
+                                                       "y":  9,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  3
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_4",
+                                        "type":  "line",
+                                        "title":  "Run time p99",
+                                        "description":  "Processor run time, 99th percentile, per processor type.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "seconds",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "histogram_quantile(0.99, sum by (le, processor_type) (rate(rtg_task_run_time_bucket[1m])))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{processor_type}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  24,
+                                                       "y":  9,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  4
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_5",
+                                        "type":  "line",
+                                        "title":  "Concurrency limit vs. in flight",
+                                        "description":  "The adaptive limit drops when pushback detects scheduling lag over budget.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "max by (worker) (rtg_worker_concurrency_limit)",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "limit {worker}"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "max by (worker) (rtg_worker_in_flight)",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "in flight {worker}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  0,
+                                                       "y":  18,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  5
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_6",
+                                        "type":  "line",
+                                        "title":  "Scheduling lag",
+                                        "description":  "How long ready work waits for a runtime thread. Pushback keeps it under the budget (default lease / 10, at most 100 ms).",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "seconds",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "max by (worker) (rtg_worker_scheduling_lag)",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{worker}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  24,
+                                                       "y":  18,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  6
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_7",
+                                        "type":  "line",
+                                        "title":  "Queue depth, pending and delayed",
+                                        "description":  "Entries per stream, claimed-but-unacked entries, and tasks waiting for a retry.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "max by (stream) (rtg_queue_depth)",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "depth {stream}"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "max by (stream) (rtg_queue_pending)",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "pending {stream}"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "max by (namespace) (rtg_queue_delayed)",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "waiting for retry {namespace}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  0,
+                                                       "y":  27,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  7
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_8",
+                                        "type":  "line",
+                                        "title":  "Retries, dead letters and lost leases",
+                                        "description":  "Per-second rates of failure handling.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "sum(rate(rtg_tasks_finished{outcome=\"retry\"}[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "retries"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "sum(rate(rtg_tasks_finished{outcome=\"dead\"}[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "dead letters"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "sum(rate(rtg_leases_lost[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "leases lost"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  24,
+                                                       "y":  27,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  8
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_9",
+                                        "type":  "line",
+                                        "title":  "Chain steps",
+                                        "description":  "Chain steps advanced, chains completed, and chains failed, per second.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "sum by (event) (rate(rtg_chain_steps[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "{event}"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  0,
+                                                       "y":  36,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  9
+                                                   }
+                                    },
+                                    {
+                                        "id":  "panel_10",
+                                        "type":  "line",
+                                        "title":  "Submissions",
+                                        "description":  "Tasks and chains submitted per second.",
+                                        "config":  {
+                                                       "show_legends":  true,
+                                                       "legends_position":  "bottom",
+                                                       "unit":  "default",
+                                                       "decimals":  2
+                                                   },
+                                        "queryType":  "promql",
+                                        "queries":  [
+                                                        {
+                                                            "query":  "sum by (processor_type) (rate(rtg_tasks_submitted[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "tasks {processor_type}"
+                                                                       }
+                                                        },
+                                                        {
+                                                            "query":  "sum(rate(rtg_chains_submitted[1m]))",
+                                                            "customQuery":  true,
+                                                            "fields":  {
+                                                                           "stream":  "",
+                                                                           "stream_type":  "metrics",
+                                                                           "x":  [
+
+                                                                                 ],
+                                                                           "y":  [
+
+                                                                                 ],
+                                                                           "z":  [
+
+                                                                                 ],
+                                                                           "filter":  {
+                                                                                          "filterType":  "group",
+                                                                                          "logicalOperator":  "AND",
+                                                                                          "conditions":  [
+
+                                                                                                         ]
+                                                                                      }
+                                                                       },
+                                                            "config":  {
+                                                                           "promql_legend":  "chains"
+                                                                       }
+                                                        }
+                                                    ],
+                                        "layout":  {
+                                                       "x":  24,
+                                                       "y":  36,
+                                                       "w":  24,
+                                                       "h":  9,
+                                                       "i":  10
+                                                   }
+                                    }
+                                ]
+                 }
+             ],
+    "defaultDatetimeDuration":  {
+                                    "type":  "relative",
+                                    "relativeTimePeriod":  "15m"
+                                }
+}

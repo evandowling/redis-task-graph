@@ -38,6 +38,9 @@ fn flag_value(args: &[String], flag: &str) -> Option<PathBuf> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--bench").collect();
     let quick = args.iter().any(|a| a == "--quick");
+    // With `--features otel`, `--otel` streams the library's metrics to the OTLP endpoint in
+    // OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS while the scenarios run.
+    let otel = args.iter().any(|a| a == "--otel").then(install_otel);
     if args.iter().any(|a| a == "--no-pushback") {
         harness::PUSHBACK.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -97,6 +100,23 @@ fn main() {
         eprintln!("wrote {}", perf_dir().join("comparison.md").display());
     }
     eprintln!("wrote {} graphs to {}", figures.len(), graphs.display());
+    if let Some(provider) = otel {
+        provider.shutdown().unwrap();
+    }
+}
+
+fn install_otel() -> opentelemetry_sdk::metrics::SdkMeterProvider {
+    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_http()
+        .build()
+        .expect("OTLP exporter");
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter).with_interval(std::time::Duration::from_secs(5)).build())
+        .with_resource(opentelemetry_sdk::Resource::builder().with_service_name("redis-task-graph-bench").build())
+        .build();
+    opentelemetry::global::set_meter_provider(provider.clone());
+    provider
 }
 
 /// Writes into `out` the pointwise median of each scenario's figures across `inputs`.

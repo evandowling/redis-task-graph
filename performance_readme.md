@@ -273,6 +273,24 @@ On the interleaved comparison:
 
 The first controller *did* cost 10–30% of no-op throughput. Re-running with pushback off traced that to the controller rather than per-task overhead. The cause was its test for saturation, a 10 ms sample of tasks in flight. With cheap tasks, permits are released and re-taken between samples, so the limit rarely grew. It now grows when a fetch actually wanted more permits than were available.
 
+## 6. Cost of live metrics
+
+The `otel` feature exports metrics over OpenTelemetry (see [`monitoring/README.md`](monitoring/README.md)). Its overhead was measured with the interleaved A/B: the candidate built with `--features otel`, exporting to a local OpenObserve every 5 s, against the previous commit without telemetry.
+
+The first version recorded about six SDK measurements per task. Throughput was unaffected, but latency near capacity was not: at 47k tasks/s, p50 went from 11 to 75 ms and p99 from 26 to 122 ms. A second run with the feature on but no exporter installed was within noise, which placed the cost in the SDK's shared aggregation state rather than in the library.
+
+The library now keeps the SDK off the per-task path:
+- **Counters** are per-type atomics that observable counters read at export time.
+- **Duration histograms** record a uniform sample of at most 500 tasks per second per processor type.
+
+| Scenario | Median change with telemetry | Flagged |
+|---|---:|---|
+| No-op throughput vs. concurrency | +1.3% | none |
+| Chain step throughput | −0.2% | none |
+| Latency vs. offered load | −2.7% | 1 of 21 points |
+
+The one flagged point is p99 at 34k tasks/s (12.7 → 18.9 ms). It comes from two of the four candidate runs (25–27 ms; the other two were 11–13 ms). The baseline's own runs spread from 11 to 20 ms at that point, so the result is inconclusive rather than a clear regression. The neighbouring load levels are within noise.
+
 ## Tuning summary
 
 | Situation | Setting |
@@ -284,3 +302,4 @@ The first controller *did* cost 10–30% of no-op throughput. Re-running with pu
 | Chains | Use only for real data dependencies; pass references, not large payloads; set `result_ttl` for high volume |
 | Short leases | Safe from runtime starvation now; keep them well above the longest Redis or network stall |
 | Comparing performance | Use `perf/ab.sh` (interleaved) rather than comparing separate runs |
+| Watching a live system | Build with `--features otel` and follow `monitoring/README.md`; overhead is within noise |

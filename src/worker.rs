@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -16,6 +17,7 @@ use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
 use crate::registry::{HandlerError, Registry};
 use crate::scripts;
 use crate::task::{ChainLink, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
+use crate::telemetry::{self, ChainEvent, ClaimSource, Finished};
 
 /// Tuning knobs for a [`Worker`].
 #[derive(Debug, Clone)]
@@ -219,23 +221,36 @@ impl Worker {
             tokio::runtime::Handle::current(),
         );
         let stats = Arc::downgrade(&monitored);
+        telemetry::register_worker(&config.consumer_name, stats.clone());
+        let stream_prefix = self.queue.keys.stream_prefix();
+        let types = streams
+            .iter()
+            .map(|s| {
+                let processor_type = s.strip_prefix(stream_prefix.as_str()).unwrap_or(s);
+                (s.clone(), telemetry::handle(processor_type))
+            })
+            .collect();
         let inner = Arc::new(Inner {
             monitored,
             in_flight: AtomicUsize::new(0),
             idle: Notify::new(),
             group,
             streams,
+            types,
             queue: self.queue,
             registry: self.registry,
             config,
         });
 
         let (tx, rx) = watch::channel(false);
-        let loops = [
+        #[allow(unused_mut)]
+        let mut loops = vec![
             tokio::spawn(fetch_loop(inner.clone(), blocking, rx.clone())),
             tokio::spawn(reclaim_loop(inner.clone(), rx.clone())),
-            tokio::spawn(promote_loop(inner.clone(), rx)),
+            tokio::spawn(promote_loop(inner.clone(), rx.clone())),
         ];
+        #[cfg(feature = "otel")]
+        loops.push(tokio::spawn(sample_queues(inner.clone(), rx)));
         let supervisor_inner = inner.clone();
         let join = tokio::spawn(async move {
             for handle in loops {
@@ -273,14 +288,7 @@ impl WorkerHandle {
     /// Current concurrency limit, in-flight count and scheduling lag. All zero once the worker
     /// has stopped.
     pub fn stats(&self) -> WorkerStats {
-        let Some(m) = self.stats.upgrade() else {
-            return WorkerStats::default();
-        };
-        WorkerStats {
-            concurrency_limit: m.limiter.limit(),
-            in_flight: m.limiter.in_flight(),
-            scheduling_lag: Duration::from_micros(m.lag_us.load(Ordering::Acquire)),
-        }
+        self.stats.upgrade().map(|m| m.stats()).unwrap_or_default()
     }
 
     /// Stops claiming new tasks and waits for in-flight tasks to finish.
@@ -298,6 +306,8 @@ struct Inner {
     config: WorkerConfig,
     group: String,
     streams: Vec<String>,
+    /// Metrics handle for each stream's processor type.
+    types: HashMap<String, telemetry::TypeHandle>,
     /// Concurrency limiter, renewed leases and lag stats, shared with the monitor thread.
     monitored: Arc<Monitored>,
     in_flight: AtomicUsize,
@@ -307,6 +317,11 @@ struct Inner {
 impl Inner {
     fn consumer(&self) -> &str {
         &self.config.consumer_name
+    }
+
+    /// Metrics for the processor type of one of this worker's streams.
+    fn metrics(&self, stream: &str) -> &telemetry::TypeHandle {
+        &self.types[stream]
     }
 
     fn limiter(&self) -> &Arc<Limiter> {
@@ -437,6 +452,7 @@ async fn fetch_loop(
                     for entry in key.ids {
                         // COUNT applies per stream, so a multi-stream read can return more
                         // entries than permits; the excess waits for a permit inside `process`.
+                        inner.metrics(&key.key).claimed(ClaimSource::Fetch);
                         dispatch(&inner, key.key.clone(), entry, permits.pop());
                     }
                 }
@@ -477,11 +493,49 @@ async fn reclaim_loop(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
                 Ok(reply) => {
                     for entry in reply.claimed {
                         debug!(stream, id = %entry.id, "reclaimed expired task");
+                        inner.metrics(stream).claimed(ClaimSource::Reclaim);
                         dispatch(&inner, stream.clone(), entry, permits.pop());
                     }
                 }
                 Err(e) => warn!(error = %e, stream, "failed to reclaim tasks"),
             }
+        }
+    }
+}
+
+/// Every few seconds, samples each stream's length and pending count, and the number of tasks
+/// waiting for a retry, for the queue gauges.
+#[cfg(feature = "otel")]
+async fn sample_queues(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
+    const INTERVAL: Duration = Duration::from_secs(5);
+    let mut conn = inner.queue.conn.clone();
+    let delayed_key = inner.queue.keys.delayed();
+    loop {
+        let mut pipe = redis::pipe();
+        for stream in &inner.streams {
+            pipe.xlen(stream).cmd("XPENDING").arg(stream).arg(&inner.group);
+        }
+        pipe.zcard(&delayed_key);
+        let reply: redis::RedisResult<Vec<redis::Value>> = pipe.query_async(&mut conn).await;
+        match reply {
+            Ok(values) => {
+                for (stream, pair) in inner.streams.iter().zip(values.chunks(2)) {
+                    let depth: u64 = redis::from_redis_value_ref(&pair[0]).unwrap_or(0);
+                    // XPENDING's summary form starts with the total number of pending entries.
+                    let pending: u64 = redis::from_redis_value_ref::<Vec<redis::Value>>(&pair[1])
+                        .ok()
+                        .and_then(|summary| summary.first().and_then(|v| redis::from_redis_value_ref(v).ok()))
+                        .unwrap_or(0);
+                    telemetry::record_queue(stream, depth, pending);
+                }
+                if let Some(delayed) = values.last().and_then(|v| redis::from_redis_value_ref(v).ok()) {
+                    telemetry::record_delayed(inner.queue.namespace(), delayed);
+                }
+            }
+            Err(e) => debug!(error = %e, "failed to sample queue sizes"),
+        }
+        if sleep_or_stop(&mut shutdown, INTERVAL).await {
+            return;
         }
     }
 }
@@ -539,24 +593,57 @@ async fn process(
     };
 
     let id = &entry.id;
+    let metrics = inner.metrics(&stream);
     let payload: String = entry.get(PAYLOAD_FIELD).unwrap_or_default();
-    let finalized = match serde_json::from_str::<TaskEnvelope>(&payload) {
+    let (finalized, report) = match serde_json::from_str::<TaskEnvelope>(&payload) {
         Ok(envelope) => {
+            let since_submit = now_millis().saturating_sub(envelope.enqueued_at);
+            let queue_time = Duration::from_millis(since_submit);
+            let started = std::time::Instant::now();
             let outcome = run(&inner, &envelope).await;
-            finalize(&inner, &stream, id, envelope, outcome).await
+            let run_time = started.elapsed();
+            let report = classify(&outcome, &envelope, inner.config.max_attempts);
+            let started = std::time::Instant::now();
+            let finalized = finalize(&inner, &stream, id, envelope, outcome).await;
+            metrics.times(queue_time, run_time, started.elapsed());
+            (finalized, report)
         }
         Err(e) => {
             error!(stream, id, error = %e, "dead-lettering undecodable entry");
             let err = format!("invalid task payload: {e}");
             let raw = serde_json::json!({ "raw": payload, "last_error": err }).to_string();
-            retry_or_dead_raw(&inner, &stream, id, "dead", raw, Duration::ZERO, None).await
+            let finalized = retry_or_dead_raw(&inner, &stream, id, "dead", raw, Duration::ZERO, None).await;
+            (finalized, (Finished::Dead, None))
         }
     };
 
     match finalized {
-        Ok(1) => {}
-        Ok(_) => warn!(stream, id, "lease lost before task was finalized; another worker owns it"),
+        Ok(1) => {
+            metrics.finished(report.0);
+            if let Some(event) = report.1 {
+                metrics.chain_step(event);
+            }
+        }
+        Ok(_) => {
+            metrics.finished(Finished::LeaseLost);
+            warn!(stream, id, "lease lost before task was finalized; another worker owns it");
+        }
         Err(e) => error!(stream, id, error = %e, "failed to finalize task; it will be redelivered"),
+    }
+}
+
+/// How a task's outcome will be reported once `finalize` has recorded it.
+fn classify(outcome: &Outcome, env: &TaskEnvelope, max_attempts: u32) -> (Finished, Option<ChainEvent>) {
+    let failed_chain = env.chain.as_ref().map(|_| ChainEvent::Failed);
+    match outcome {
+        Outcome::Succeeded(_) => {
+            let event = env.chain.as_ref().map(|link| {
+                if link.remaining.is_empty() { ChainEvent::Completed } else { ChainEvent::Advanced }
+            });
+            (Finished::Success, event)
+        }
+        Outcome::Failed(_) if env.attempt + 1 < max_attempts => (Finished::Retry, None),
+        Outcome::Failed(_) | Outcome::Fatal(_) => (Finished::Dead, failed_chain),
     }
 }
 

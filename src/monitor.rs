@@ -44,6 +44,15 @@ impl Monitored {
         })
     }
 
+    /// Current limit, in-flight count and latest lag sample.
+    pub(crate) fn stats(&self) -> crate::worker::WorkerStats {
+        crate::worker::WorkerStats {
+            concurrency_limit: self.limiter.limit(),
+            in_flight: self.limiter.in_flight(),
+            scheduling_lag: Duration::from_micros(self.lag_us.load(Ordering::Acquire)),
+        }
+    }
+
     /// Records how long a processor waited between being spawned and starting to run.
     pub(crate) fn record_start_delay(&self, delay: Duration) {
         self.start_delay_us.fetch_max(delay.as_micros() as u64, Ordering::AcqRel);
@@ -255,6 +264,7 @@ fn renew_leases(
             }
             Ok(_) => {
                 warn!(stream = key.0, id = key.1, "lease lost; another worker may run this task");
+                crate::telemetry::lease_lost(&key.0);
                 shared.leases.lock().unwrap().remove(&key);
             }
             Err(e) => {
