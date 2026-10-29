@@ -23,7 +23,22 @@ pub struct Series {
     pub name: String,
     /// Reference lines (e.g. theoretical limits) are drawn dashed in neutral ink.
     pub reference: bool,
+    /// Set on a series holding an earlier run of the named series; drawn dashed in that
+    /// series' color.
+    #[serde(default)]
+    pub baseline_of: Option<String>,
     pub points: Vec<(f64, f64)>,
+}
+
+impl Series {
+    /// Whether this series takes a categorical color slot of its own.
+    pub fn is_primary(&self) -> bool {
+        !self.reference && self.baseline_of.is_none()
+    }
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +53,10 @@ pub struct Figure {
     pub x_format: Format,
     pub y_format: Format,
     pub series: Vec<Series>,
+    /// Whether larger y values are better (throughput) or worse (latency, duplicates); used to
+    /// tell regressions from improvements.
+    #[serde(default = "yes")]
+    pub higher_is_better: bool,
     /// Free-form measurements that don't fit the chart, keyed by name.
     #[serde(default)]
     pub notes: Vec<(String, String)>,
@@ -56,6 +75,7 @@ impl Figure {
             x_format: Format::Number,
             y_format: Format::Number,
             series: Vec::new(),
+            higher_is_better: true,
             notes: Vec::new(),
         }
     }
@@ -64,7 +84,12 @@ impl Figure {
         if let Some(i) = self.series.iter().position(|s| s.name == name) {
             return &mut self.series[i];
         }
-        self.series.push(Series { name: name.into(), reference: false, points: Vec::new() });
+        self.series.push(Series {
+            name: name.into(),
+            reference: false,
+            baseline_of: None,
+            points: Vec::new(),
+        });
         self.series.last_mut().unwrap()
     }
 

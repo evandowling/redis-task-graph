@@ -12,6 +12,7 @@
     {
       "name": "compute on runtime",
       "reference": false,
+      "baseline_of": null,
       "points": [
         [
           1.0,
@@ -23,17 +24,18 @@
         ],
         [
           4.0,
-          18.75
+          0.0
         ],
         [
           8.0,
-          15.625
+          0.0
         ]
       ]
     },
     {
       "name": "spawn_blocking",
       "reference": false,
+      "baseline_of": null,
       "points": [
         [
           1.0,
@@ -54,6 +56,7 @@
       ]
     }
   ],
+  "higher_is_better": false,
   "notes": [
     [
       "compute on runtime c=1 executions/tasks",
@@ -65,11 +68,11 @@
     ],
     [
       "compute on runtime c=4 executions/tasks",
-      "38/32"
+      "32/32"
     ],
     [
       "compute on runtime c=8 executions/tasks",
-      "37/32"
+      "32/32"
     ],
     [
       "spawn_blocking c=1 executions/tasks",

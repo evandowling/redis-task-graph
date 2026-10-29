@@ -1,16 +1,18 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamAutoClaimReply, StreamId, StreamReadOptions, StreamReadReply};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::client::TaskQueue;
 use crate::error::{Error, Result};
+use crate::limiter::{Limiter, Permit};
+use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
 use crate::registry::{HandlerError, Registry};
 use crate::scripts;
 use crate::task::{ChainLink, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
@@ -18,8 +20,19 @@ use crate::task::{ChainLink, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
 /// Tuning knobs for a [`Worker`].
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
-    /// Maximum number of tasks processed at once by this worker.
+    /// Maximum number of tasks processed at once by this worker. With adaptive concurrency the
+    /// effective limit moves between `min_concurrency` and this value.
     pub concurrency: usize,
+    /// Lower bound for the adaptive concurrency limit.
+    pub min_concurrency: usize,
+    /// Whether to lower the concurrency limit when the runtime falls behind (pushback), and raise
+    /// it again as the runtime recovers.
+    pub adaptive_concurrency: bool,
+    /// Scheduling lag above which the concurrency limit is lowered: how long a ready task may
+    /// wait for a runtime thread. Defaults to a tenth of the lease, clamped to 5–100 ms.
+    pub max_scheduling_lag: Option<Duration>,
+    /// How often the monitor thread samples scheduling lag.
+    pub probe_interval: Duration,
     /// Maximum number of entries claimed per read.
     pub batch_size: usize,
     /// How long a read blocks waiting for new entries.
@@ -44,6 +57,10 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             concurrency: 16,
+            min_concurrency: 1,
+            adaptive_concurrency: true,
+            max_scheduling_lag: None,
+            probe_interval: Duration::from_millis(10),
             batch_size: 16,
             block: Duration::from_secs(1),
             lease: Duration::from_secs(30),
@@ -55,6 +72,26 @@ impl Default for WorkerConfig {
             consumer_name: format!("worker-{}", Uuid::new_v4()),
         }
     }
+}
+
+impl WorkerConfig {
+    /// The effective scheduling-lag budget.
+    pub fn lag_budget(&self) -> Duration {
+        self.max_scheduling_lag.unwrap_or_else(|| {
+            (self.lease / 10).clamp(Duration::from_millis(5), Duration::from_millis(100))
+        })
+    }
+}
+
+/// A snapshot of a worker's load, from [`WorkerHandle::stats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkerStats {
+    /// Current concurrency limit; below the configured maximum while pushback is active.
+    pub concurrency_limit: usize,
+    /// Tasks currently holding a concurrency permit.
+    pub in_flight: usize,
+    /// Most recent scheduling-lag sample.
+    pub scheduling_lag: Duration,
 }
 
 /// Builds and starts a background worker that scans for tasks and dispatches them to the
@@ -81,6 +118,22 @@ impl Worker {
 
     pub fn concurrency(mut self, n: usize) -> Self {
         self.config.concurrency = n.max(1);
+        self
+    }
+
+    pub fn min_concurrency(mut self, n: usize) -> Self {
+        self.config.min_concurrency = n.max(1);
+        self
+    }
+
+    /// Enables or disables pushback (adaptive concurrency). Enabled by default.
+    pub fn adaptive_concurrency(mut self, enabled: bool) -> Self {
+        self.config.adaptive_concurrency = enabled;
+        self
+    }
+
+    pub fn max_scheduling_lag(mut self, d: Duration) -> Self {
+        self.config.max_scheduling_lag = Some(d);
         self
     }
 
@@ -142,15 +195,39 @@ impl Worker {
         }
         let blocking = self.queue.blocking_connection(self.config.block).await?;
 
+        let config = self.config;
+        // With pushback, start at the runtime's thread count and let slow start find the limit.
+        let initial = if config.adaptive_concurrency {
+            let threads = tokio::runtime::Handle::current().metrics().num_workers();
+            threads.clamp(config.min_concurrency, config.concurrency.max(config.min_concurrency))
+        } else {
+            config.concurrency
+        };
+        let monitored = Monitored::new(Limiter::new(initial), config.lease);
+        let monitor = Monitor::spawn(
+            MonitorConfig {
+                client: self.queue.client.clone(),
+                group: group.clone(),
+                consumer: config.consumer_name.clone(),
+                probe_interval: config.probe_interval,
+                lag_budget: config.lag_budget(),
+                adaptive: config.adaptive_concurrency,
+                min_concurrency: config.min_concurrency.min(config.concurrency),
+                max_concurrency: config.concurrency,
+            },
+            &monitored,
+            tokio::runtime::Handle::current(),
+        );
+        let stats = Arc::downgrade(&monitored);
         let inner = Arc::new(Inner {
-            semaphore: Arc::new(Semaphore::new(self.config.concurrency)),
+            monitored,
             in_flight: AtomicUsize::new(0),
             idle: Notify::new(),
             group,
             streams,
             queue: self.queue,
             registry: self.registry,
-            config: self.config,
+            config,
         });
 
         let (tx, rx) = watch::channel(false);
@@ -167,12 +244,15 @@ impl Worker {
                 }
             }
             supervisor_inner.wait_idle().await;
+            // In-flight tasks are done, so no leases remain to renew.
+            let _ = tokio::task::spawn_blocking(move || monitor.stop()).await;
         });
 
         Ok(WorkerHandle {
             shutdown: tx,
             join,
             consumer_name: inner.config.consumer_name.clone(),
+            stats,
         })
     }
 }
@@ -182,11 +262,25 @@ pub struct WorkerHandle {
     shutdown: watch::Sender<bool>,
     join: JoinHandle<()>,
     consumer_name: String,
+    stats: Weak<Monitored>,
 }
 
 impl WorkerHandle {
     pub fn consumer_name(&self) -> &str {
         &self.consumer_name
+    }
+
+    /// Current concurrency limit, in-flight count and scheduling lag. All zero once the worker
+    /// has stopped.
+    pub fn stats(&self) -> WorkerStats {
+        let Some(m) = self.stats.upgrade() else {
+            return WorkerStats::default();
+        };
+        WorkerStats {
+            concurrency_limit: m.limiter.limit(),
+            in_flight: m.limiter.in_flight(),
+            scheduling_lag: Duration::from_micros(m.lag_us.load(Ordering::Acquire)),
+        }
     }
 
     /// Stops claiming new tasks and waits for in-flight tasks to finish.
@@ -204,7 +298,8 @@ struct Inner {
     config: WorkerConfig,
     group: String,
     streams: Vec<String>,
-    semaphore: Arc<Semaphore>,
+    /// Concurrency limiter, renewed leases and lag stats, shared with the monitor thread.
+    monitored: Arc<Monitored>,
     in_flight: AtomicUsize,
     idle: Notify,
 }
@@ -214,22 +309,26 @@ impl Inner {
         &self.config.consumer_name
     }
 
+    fn limiter(&self) -> &Arc<Limiter> {
+        &self.monitored.limiter
+    }
+
     /// Takes one permit, waiting if necessary, then as many more as are free up to `max`.
     /// Returns `None` if shutdown was signalled while waiting.
     async fn acquire_batch(
         &self,
         max: usize,
         shutdown: &mut watch::Receiver<bool>,
-    ) -> Option<Vec<OwnedSemaphorePermit>> {
+    ) -> Option<Vec<Permit>> {
         let first = tokio::select! {
-            p = self.semaphore.clone().acquire_owned() => p.expect("semaphore is never closed"),
+            p = self.limiter().acquire() => p,
             _ = shutdown.changed() => return None,
         };
         let mut permits = vec![first];
         while permits.len() < max {
-            match self.semaphore.clone().try_acquire_owned() {
-                Ok(p) => permits.push(p),
-                Err(_) => break,
+            match self.limiter().try_acquire() {
+                Some(p) => permits.push(p),
+                None => break,
             }
         }
         Some(permits)
@@ -298,10 +397,14 @@ fn dispatch(
     inner: &Arc<Inner>,
     stream: String,
     entry: StreamId,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<Permit>,
 ) {
     let guard = InFlight::new(inner);
-    tokio::spawn(process(inner.clone(), stream, entry, permit, guard));
+    let dispatched_at = std::time::Instant::now();
+    // Start renewing the lease now, at claim time: the task may wait in the run queue for longer
+    // than the lease when the runtime is saturated.
+    let lease = inner.monitored.hold_lease(&stream, &entry.id);
+    tokio::spawn(process(inner.clone(), stream, entry, permit, guard, dispatched_at, lease));
 }
 
 async fn fetch_loop(
@@ -324,6 +427,12 @@ async fn fetch_loop(
             redis::AsyncCommands::xread_options(&mut conn, &inner.streams, &ids, &opts).await;
         match reply {
             Ok(Some(reply)) => {
+                // Work filled every permit we could get, and we couldn't get a full batch: demand
+                // exceeds the limit, which lets pushback raise it while the runtime keeps up.
+                let entries: usize = reply.keys.iter().map(|k| k.ids.len()).sum();
+                if entries >= permits.len() && permits.len() < inner.config.batch_size {
+                    inner.limiter().mark_contended();
+                }
                 for key in reply.keys {
                     for entry in key.ids {
                         // COUNT applies per stream, so a multi-stream read can return more
@@ -415,19 +524,18 @@ async fn process(
     inner: Arc<Inner>,
     stream: String,
     entry: StreamId,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<Permit>,
     _guard: InFlight,
+    dispatched_at: std::time::Instant,
+    _lease: LeaseGuard,
 ) {
-    // Keep the lease alive from the moment the entry is claimed, including while waiting for a permit.
-    let heartbeat = tokio::spawn(heartbeat(inner.clone(), stream.clone(), entry.id.clone()));
+    // How long this task sat in the runtime queue: a direct measure of scheduling lag.
+    inner.monitored.record_start_delay(dispatched_at.elapsed());
+    // `_lease`, taken at claim time, keeps the lease renewed until this function returns: while
+    // queued, waiting for a permit, running, and recording the outcome.
     let _permit = match permit {
         Some(p) => p,
-        None => inner
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore is never closed"),
+        None => inner.limiter().acquire().await,
     };
 
     let id = &entry.id;
@@ -435,11 +543,9 @@ async fn process(
     let finalized = match serde_json::from_str::<TaskEnvelope>(&payload) {
         Ok(envelope) => {
             let outcome = run(&inner, &envelope).await;
-            heartbeat.abort();
             finalize(&inner, &stream, id, envelope, outcome).await
         }
         Err(e) => {
-            heartbeat.abort();
             error!(stream, id, error = %e, "dead-lettering undecodable entry");
             let err = format!("invalid task payload: {e}");
             let raw = serde_json::json!({ "raw": payload, "last_error": err }).to_string();
@@ -670,29 +776,6 @@ where
         }
     }
     Err(last.expect("at least one attempt ran"))
-}
-
-async fn heartbeat(inner: Arc<Inner>, stream: String, id: String) {
-    let mut conn = inner.queue.conn.clone();
-    let period = (inner.config.lease / 3).max(Duration::from_millis(50));
-    loop {
-        tokio::time::sleep(period).await;
-        let res: redis::RedisResult<i64> = scripts::HEARTBEAT
-            .key(&stream)
-            .arg(&inner.group)
-            .arg(&id)
-            .arg(inner.consumer())
-            .invoke_async(&mut conn)
-            .await;
-        match res {
-            Ok(1) => {}
-            Ok(_) => {
-                warn!(stream, id, "lease lost; another worker may run this task");
-                return;
-            }
-            Err(e) => warn!(stream, id, error = %e, "heartbeat failed"),
-        }
-    }
 }
 
 /// Delay before retry number `attempt` (1-based): `base * 2^(attempt-1)` capped at `max`, with

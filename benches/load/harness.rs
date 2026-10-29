@@ -11,11 +11,14 @@ use tokio::sync::oneshot;
 
 use futures::StreamExt;
 use redis::AsyncCommands;
-use redis_task_graph::{Registry, TaskQueue, TaskType, Worker, WorkerHandle};
+use redis_task_graph::{Registry, TaskQueue, TaskType, Worker, WorkerHandle, WorkerStats};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 pub const REDIS_URL: &str = "redis://127.0.0.1/";
+
+/// Default for `ClusterSpec::adaptive`; cleared by `--no-pushback`.
+pub static PUSHBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Typed chain step: does the configured work and passes the job on with `hop + 1`.
 pub const STEP: TaskType<Job, Job> = TaskType::new("step");
@@ -282,11 +285,13 @@ pub struct ClusterSpec {
     pub concurrency: usize,
     pub lease: Duration,
     pub work: Work,
+    /// Whether the worker adapts its concurrency limit to scheduling lag (pushback).
+    pub adaptive: bool,
 }
 
 impl ClusterSpec {
     pub fn new(concurrency: usize, work: Work) -> Self {
-        Self { workers: 1, threads: 8, concurrency, lease: Duration::from_secs(30), work }
+        Self { workers: 1, threads: 8, concurrency, lease: Duration::from_secs(30), work, adaptive: PUSHBACK.load(Ordering::Relaxed) }
     }
 }
 
@@ -313,6 +318,7 @@ impl Cluster {
                         .concurrency(spec.concurrency)
                         .batch_size(spec.concurrency.min(64))
                         .lease(spec.lease)
+                        .adaptive_concurrency(spec.adaptive)
                         .spawn()
                         .await
                         .unwrap()
@@ -321,6 +327,11 @@ impl Cluster {
             })
             .collect();
         Cluster { workers }
+    }
+
+    /// Load snapshot of the first worker.
+    pub fn stats(&self) -> WorkerStats {
+        self.workers[0].1.stats()
     }
 
     pub fn stop(self) {

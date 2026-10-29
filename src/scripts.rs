@@ -93,11 +93,14 @@ return 1
 });
 
 /// KEYS: stream. ARGV: group, id, consumer. Resets the entry's idle time if still owned.
-/// Returns 1 if the lease was extended, 0 if it was lost.
+/// Returns 1 if the lease was extended, 0 if another consumer now owns the entry, and -1 if
+/// the entry is no longer pending (it was already acked).
 pub(crate) static HEARTBEAT: LazyLock<Script> = LazyLock::new(|| {
-    with_owned(
+    Script::new(
         r"
-if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
+if #pending == 0 then return -1 end
+if pending[1][2] ~= ARGV[3] then return 0 end
 redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[3], 0, ARGV[2], 'JUSTID')
 return 1
 ",

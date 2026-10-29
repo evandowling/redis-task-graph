@@ -12,166 +12,170 @@
     {
       "name": "chain",
       "reference": false,
+      "baseline_of": null,
       "points": [
         [
           1.0,
-          0.331
+          0.3
         ],
         [
           2.0,
-          0.58
+          0.559
         ],
         [
           4.0,
-          1.058
+          0.963
         ],
         [
           8.0,
-          1.58
+          1.6
         ],
         [
           16.0,
-          2.592
+          2.307
         ],
         [
           32.0,
-          4.424
+          4.32
         ]
       ]
     },
     {
       "name": "DIY chain (step submits next)",
       "reference": false,
+      "baseline_of": null,
       "points": [
         [
           1.0,
-          0.322
+          0.324
         ],
         [
           2.0,
-          0.499
+          0.486
         ],
         [
           4.0,
-          0.957
+          0.965
         ],
         [
           8.0,
-          1.405
+          1.493
         ],
         [
           16.0,
-          2.462
+          2.507
         ],
         [
           32.0,
-          4.003
+          3.904
         ]
       ]
     },
     {
       "name": "independent tasks (parallel)",
       "reference": false,
+      "baseline_of": null,
       "points": [
         [
           1.0,
-          0.392
+          0.28
         ],
         [
           2.0,
-          0.492
+          0.454
         ],
         [
           4.0,
-          0.871
+          0.881
         ],
         [
           8.0,
-          1.397
+          1.403
         ],
         [
           16.0,
-          2.149
+          2.263
         ],
         [
           32.0,
-          3.658
+          4.014
         ]
       ]
     }
   ],
+  "higher_is_better": false,
   "notes": [
     [
       "chain len=1 p90_ms",
-      "0.48"
+      "0.57"
     ],
     [
       "chain len=2 p90_ms",
-      "0.75"
+      "0.74"
     ],
     [
       "chain len=4 p90_ms",
-      "1.41"
+      "1.32"
     ],
     [
       "chain len=8 p90_ms",
-      "2.04"
+      "1.83"
     ],
     [
       "chain len=16 p90_ms",
-      "3.12"
+      "2.94"
     ],
     [
       "chain len=32 p90_ms",
-      "5.09"
+      "4.88"
     ],
     [
       "DIY chain (step submits next) len=1 p90_ms",
-      "0.43"
+      "0.47"
     ],
     [
       "DIY chain (step submits next) len=2 p90_ms",
-      "0.70"
+      "0.60"
     ],
     [
       "DIY chain (step submits next) len=4 p90_ms",
-      "1.39"
+      "1.22"
     ],
     [
       "DIY chain (step submits next) len=8 p90_ms",
-      "1.75"
+      "1.90"
     ],
     [
       "DIY chain (step submits next) len=16 p90_ms",
-      "2.79"
+      "3.71"
     ],
     [
       "DIY chain (step submits next) len=32 p90_ms",
-      "5.01"
+      "4.54"
     ],
     [
       "independent tasks (parallel) len=1 p90_ms",
-      "0.50"
+      "0.43"
     ],
     [
       "independent tasks (parallel) len=2 p90_ms",
-      "0.64"
+      "0.56"
     ],
     [
       "independent tasks (parallel) len=4 p90_ms",
-      "1.10"
+      "1.12"
     ],
     [
       "independent tasks (parallel) len=8 p90_ms",
-      "1.88"
+      "2.04"
     ],
     [
       "independent tasks (parallel) len=16 p90_ms",
-      "2.80"
+      "2.67"
     ],
     [
       "independent tasks (parallel) len=32 p90_ms",
-      "4.37"
+      "4.66"
     ]
   ]
 }

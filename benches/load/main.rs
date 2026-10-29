@@ -5,11 +5,15 @@
 //! cargo bench --bench load -- chain_latency io_bound
 //! cargo bench --bench load -- --quick              # smaller runs for a smoke test
 //! cargo bench --bench load -- --plot               # re-render graphs from saved results
+//! cargo bench --bench load -- --compare <dir> [--noise <dir>]
 //! ```
 //!
 //! Results are written to `perf/results/<scenario>.json`, graphs to `perf/graphs/`, and a
-//! table of every result to `perf/results/summary.md`.
+//! table of every result to `perf/results/summary.md`. `--compare` compares the saved results
+//! against a baseline results directory, using a second baseline run (`--noise`) to estimate
+//! run-to-run variation, and writes `perf/comparison.md` with before/after graphs.
 
+mod compare;
 mod figure;
 mod harness;
 mod plot;
@@ -24,16 +28,40 @@ fn perf_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("perf")
 }
 
+/// Value following `flag` on the command line, if present.
+fn flag_value(args: &[String], flag: &str) -> Option<PathBuf> {
+    args.iter().position(|a| a == flag).map(|i| {
+        PathBuf::from(args.get(i + 1).unwrap_or_else(|| panic!("{flag} needs a directory")))
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--bench").collect();
     let quick = args.iter().any(|a| a == "--quick");
-    let plot_only = args.iter().any(|a| a == "--plot");
-    let selected: Vec<&str> = args.iter().filter(|a| !a.starts_with("--")).map(String::as_str).collect();
+    if args.iter().any(|a| a == "--no-pushback") {
+        harness::PUSHBACK.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(i) = args.iter().position(|a| a == "--merge-median") {
+        let out = PathBuf::from(&args[i + 1]);
+        let inputs: Vec<PathBuf> = args[i + 2..].iter().map(PathBuf::from).collect();
+        merge_median(&out, &inputs);
+        return;
+    }
+    let compare_dir = flag_value(&args, "--compare");
+    let noise_dir = flag_value(&args, "--noise");
+    let current_dir = flag_value(&args, "--current");
+    let plot_only = args.iter().any(|a| a == "--plot") || compare_dir.is_some() || current_dir.is_some();
+    let values: Vec<&PathBuf> = compare_dir.iter().chain(noise_dir.iter()).chain(current_dir.iter()).collect();
+    let selected: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with("--") && !values.iter().any(|v| v.as_os_str() == a.as_str()))
+        .map(String::as_str)
+        .collect();
     for name in &selected {
         assert!(scenarios::ALL.iter().any(|(n, _)| n == name), "unknown scenario `{name}`");
     }
 
-    let results = perf_dir().join("results");
+    let results = current_dir.unwrap_or_else(|| perf_dir().join("results"));
     let graphs = perf_dir().join("graphs");
     std::fs::create_dir_all(&results).unwrap();
     std::fs::create_dir_all(&graphs).unwrap();
@@ -64,7 +92,28 @@ fn main() {
         }
     }
     std::fs::write(results.join("summary.md"), summary(&figures)).unwrap();
+    if let Some(baseline) = &compare_dir {
+        compare::run(&figures, baseline, noise_dir.as_deref(), &perf_dir(), &graphs).unwrap();
+        eprintln!("wrote {}", perf_dir().join("comparison.md").display());
+    }
     eprintln!("wrote {} graphs to {}", figures.len(), graphs.display());
+}
+
+/// Writes into `out` the pointwise median of each scenario's figures across `inputs`.
+fn merge_median(out: &Path, inputs: &[PathBuf]) {
+    std::fs::create_dir_all(out).unwrap();
+    for (name, _) in scenarios::ALL {
+        let figures: Vec<Figure> = inputs
+            .iter()
+            .filter_map(|dir| std::fs::read_to_string(dir.join(format!("{name}.json"))).ok())
+            .map(|json| serde_json::from_str(&json).unwrap())
+            .collect();
+        if let Some(merged) = compare::median_figure(&figures) {
+            let json = serde_json::to_string_pretty(&merged).unwrap();
+            std::fs::write(out.join(format!("{name}.json")), json).unwrap();
+        }
+    }
+    eprintln!("merged {} runs into {}", inputs.len(), out.display());
 }
 
 fn write_environment(dir: &Path) {

@@ -23,31 +23,31 @@ Duplicate executions (% of tasks)
 Concurrency limit per worker (4 runtime threads each)
 </text>
 <line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="489" x2="789" y2="489"/>
-<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="396" x2="789" y2="396"/>
-<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="303" x2="789" y2="303"/>
-<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="210" x2="789" y2="210"/>
-<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="117" x2="789" y2="117"/>
+<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="395" x2="789" y2="395"/>
+<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="301" x2="789" y2="301"/>
+<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="207" x2="789" y2="207"/>
+<line opacity="1" stroke="#E7E6E2" stroke-width="1" x1="100" y1="112" x2="789" y2="112"/>
 <polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="99,112 99,489 "/>
 <text x="90" y="489" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
 0%
 </text>
 <polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,489 99,489 "/>
-<text x="90" y="396" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
-5.0%
+<text x="90" y="395" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
+0.0%
 </text>
-<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,396 99,396 "/>
-<text x="90" y="303" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
-10%
+<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,395 99,395 "/>
+<text x="90" y="301" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
+0.0%
 </text>
-<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,303 99,303 "/>
-<text x="90" y="210" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
-15%
+<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,301 99,301 "/>
+<text x="90" y="207" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
+0.0%
 </text>
-<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,210 99,210 "/>
-<text x="90" y="117" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
-20%
+<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,207 99,207 "/>
+<text x="90" y="112" dy="0.5ex" text-anchor="end" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
+0.0%
 </text>
-<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,117 99,117 "/>
+<polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="94,112 99,112 "/>
 <polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="100,490 789,490 "/>
 <text x="131" y="500" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="11.290322580645162" opacity="1" fill="#52514E">
 1
@@ -65,15 +65,15 @@ Concurrency limit per worker (4 runtime threads each)
 8
 </text>
 <polyline fill="none" opacity="1" stroke="#A3A29C" stroke-width="1" points="757,490 757,495 "/>
-<polyline fill="none" opacity="1" stroke="#2A78D6" stroke-width="2" points="131,489 340,489 548,140 757,199 "/>
+<polyline fill="none" opacity="1" stroke="#2A78D6" stroke-width="2" points="131,489 340,489 548,489 757,489 "/>
 <circle cx="131" cy="489" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
 <circle cx="340" cy="489" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
-<circle cx="548" cy="140" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
-<circle cx="757" cy="199" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
+<circle cx="548" cy="489" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
+<circle cx="757" cy="489" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
 <circle cx="131" cy="489" r="4" opacity="1" fill="#2A78D6" stroke="none" stroke-width="1"/>
 <circle cx="340" cy="489" r="4" opacity="1" fill="#2A78D6" stroke="none" stroke-width="1"/>
-<circle cx="548" cy="140" r="4" opacity="1" fill="#2A78D6" stroke="none" stroke-width="1"/>
-<circle cx="757" cy="199" r="4" opacity="1" fill="#2A78D6" stroke="none" stroke-width="1"/>
+<circle cx="548" cy="489" r="4" opacity="1" fill="#2A78D6" stroke="none" stroke-width="1"/>
+<circle cx="757" cy="489" r="4" opacity="1" fill="#2A78D6" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#EB6834" stroke-width="2" points="131,489 340,489 548,489 757,489 "/>
 <circle cx="131" cy="489" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
 <circle cx="340" cy="489" r="6" opacity="1" fill="#FCFCFB" stroke="none" stroke-width="1"/>
@@ -83,10 +83,10 @@ Concurrency limit per worker (4 runtime threads each)
 <circle cx="340" cy="489" r="4" opacity="1" fill="#EB6834" stroke="none" stroke-width="1"/>
 <circle cx="548" cy="489" r="4" opacity="1" fill="#EB6834" stroke="none" stroke-width="1"/>
 <circle cx="757" cy="489" r="4" opacity="1" fill="#EB6834" stroke="none" stroke-width="1"/>
-<text x="769" y="199" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="10.483870967741936" opacity="1" fill="#52514E">
+<text x="769" y="489" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="10.483870967741936" opacity="1" fill="#52514E">
 compute on runtime
 </text>
-<text x="769" y="489" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="10.483870967741936" opacity="1" fill="#52514E">
+<text x="769" y="506" dy="0.5ex" text-anchor="start" font-family="sans-serif" font-size="10.483870967741936" opacity="1" fill="#52514E">
 spawn_blocking
 </text>
 </svg>

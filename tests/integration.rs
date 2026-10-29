@@ -46,8 +46,12 @@ impl Drop for TestQueue {
     }
 }
 
+fn redis_url() -> String {
+    std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into())
+}
+
 async fn setup() -> Option<TestQueue> {
-    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
+    let url = redis_url();
     let client = redis::Client::open(url.as_str()).ok()?;
     let conn = match tokio::time::timeout(
         Duration::from_secs(2),
@@ -679,5 +683,131 @@ mod chains {
         worker.shutdown().await;
         assert_eq!(status, Some(ChainStatus::Completed(serde_json::Value::Null)));
         assert_eq!(*seen.lock().unwrap(), vec![7, 8]);
+    }
+}
+
+mod pushback {
+    use super::*;
+
+    /// Registers a processor that blocks its runtime thread for `block`, counting executions.
+    fn blocking_registry(block: Duration, runs: Arc<AtomicUsize>) -> Registry {
+        let mut reg = Registry::new();
+        reg.register("block", move |_: Ctx| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(block);
+                Ok(())
+            }
+        })
+        .unwrap();
+        reg
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_runtime_lowers_the_limit_and_recovery_raises_it() {
+        let Some(t) = setup().await else { return };
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut reg = blocking_registry(Duration::from_millis(200), runs.clone());
+        reg.register("noop", |_: Ctx| async { Ok(()) }).unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .concurrency(8)
+            .lease(Duration::from_millis(300))
+            .spawn()
+            .await
+            .unwrap();
+        // Slow start begins at the runtime's thread count.
+        assert_eq!(worker.stats().concurrency_limit, 2);
+
+        // A flood of cheap tasks keeps the worker saturated without lag, so the limit grows.
+        let flood = |from: u32| {
+            let q = t.queue.clone();
+            async move {
+                for n in from..from + 3000 {
+                    q.submit("noop", &ctx(n)).await.unwrap();
+                }
+            }
+        };
+        flood(0).await;
+        assert!(
+            eventually(Duration::from_secs(10), || async { worker.stats().concurrency_limit == 8 }).await,
+            "slow start reached the maximum: {:?}",
+            worker.stats()
+        );
+
+        // Processors that block the runtime push the limit back down.
+        for n in 0..16 {
+            t.queue.submit("block", &ctx(n)).await.unwrap();
+        }
+        assert!(
+            eventually(Duration::from_secs(5), || async { worker.stats().concurrency_limit < 8 }).await,
+            "pushback lowered the limit: {:?}",
+            worker.stats()
+        );
+        assert!(eventually(Duration::from_secs(10), || async { runs.load(Ordering::SeqCst) == 16 }).await);
+
+        // Once the runtime keeps up again, the limit recovers.
+        flood(10_000).await;
+        assert!(
+            eventually(Duration::from_secs(10), || async { worker.stats().concurrency_limit == 8 }).await,
+            "limit recovered: {:?}",
+            worker.stats()
+        );
+        worker.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leases_survive_processors_that_block_every_runtime_thread() {
+        let Some(mut t) = setup().await else { return };
+        let runs = Arc::new(AtomicUsize::new(0));
+        for n in 0..3 {
+            t.queue.submit("block", &ctx(n)).await.unwrap();
+        }
+
+        // The worker gets its own single-thread runtime, which each task blocks for three leases.
+        let worker_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let ns = t.queue.namespace().to_owned();
+        let reg = blocking_registry(Duration::from_millis(900), runs.clone());
+        let worker = worker_rt
+            .spawn(async move {
+                let queue = TaskQueue::connect(&redis_url(), ns).await.unwrap();
+                fast(Worker::builder(queue, reg))
+                    .concurrency(1)
+                    .lease(Duration::from_millis(300))
+                    .adaptive_concurrency(false)
+                    .spawn()
+                    .await
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+
+        // Meanwhile a thief tries to take over any entry whose lease has lapsed.
+        let (stream, group) = (t.queue.stream_key("block"), t.queue.group_name());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while runs.load(Ordering::SeqCst) < 3 || t.xlen("block").await > 0 {
+            assert!(tokio::time::Instant::now() < deadline, "tasks did not finish");
+            let stolen: redis::streams::StreamAutoClaimReply = redis::cmd("XAUTOCLAIM")
+                .arg(&stream)
+                .arg(&group)
+                .arg("thief")
+                .arg(300)
+                .arg("0-0")
+                .arg("COUNT")
+                .arg(10)
+                .query_async(&mut t.conn)
+                .await
+                .unwrap();
+            assert!(stolen.claimed.is_empty(), "a lease lapsed while its task was running");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        worker.shutdown().await;
+        worker_rt.shutdown_background();
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "no task ran twice");
     }
 }

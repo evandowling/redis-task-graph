@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::figure::{Figure, Format, Scale};
 use crate::harness::*;
+use redis_task_graph::WorkerStats;
 
 pub struct Opts {
     /// Multiplier on job counts and repetitions; < 1 for a fast smoke run.
@@ -34,6 +35,8 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("lease_starvation", lease_starvation),
     ("payload_size", payload_size),
     ("worker_scaling", worker_scaling),
+    ("pushback_limit", pushback_limit),
+    ("pushback_lag", pushback_lag),
 ];
 
 const POW2: fn(u32, u32) -> Vec<usize> = |lo, hi| (lo..=hi).map(|k| 1usize << k).collect();
@@ -117,6 +120,7 @@ pub fn latency_under_load(o: &Opts) -> Figure {
         "Offered load (tasks / s)",
         "Submit-to-completion latency (ms)",
     );
+    fig.higher_is_better = false;
     fig.y_scale = Scale::Log10;
     let spec = ClusterSpec::new(64, Work::Noop);
     let capacity = drain(spec, Shape::Task, o.jobs(30_000.0, 3000, 30_000), 0).rate;
@@ -134,6 +138,8 @@ pub fn latency_under_load(o: &Opts) -> Figure {
         let cluster = Cluster::start(spec, &ns, &rec);
         let rt = driver();
         let total = (rate * secs) as u64;
+        // Lowest concurrency limit and highest scheduling lag seen while load was offered.
+        let (mut min_limit, mut max_limit, mut max_lag) = (usize::MAX, 0, Duration::ZERO);
         rt.block_on(async {
             let q = connect(&ns).await;
             let start = Instant::now();
@@ -147,6 +153,10 @@ pub fn latency_under_load(o: &Opts) -> Figure {
                     });
                     sent += 1;
                 }
+                let stats = cluster.stats();
+                min_limit = min_limit.min(stats.concurrency_limit);
+                max_limit = max_limit.max(stats.concurrency_limit);
+                max_lag = max_lag.max(stats.scheduling_lag);
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             wait_done(&rec, total as usize, Duration::from_secs(60)).await;
@@ -155,7 +165,15 @@ pub fn latency_under_load(o: &Opts) -> Figure {
         rt.block_on(cleanup(&ns));
         let lat = rec.take_latencies_ms();
         let (p50, p90, p99) = (percentile(&lat, 0.5), percentile(&lat, 0.9), percentile(&lat, 0.99));
-        log(format!("{:.0}% ({rate:.0}/s): p50 {p50:.2} p90 {p90:.2} p99 {p99:.2} ms", frac * 100.0));
+        log(format!(
+            "{:.0}% ({rate:.0}/s): p50 {p50:.2} p90 {p90:.2} p99 {p99:.2} ms; limit {min_limit}-{max_limit}, max lag {:.1} ms",
+            frac * 100.0,
+            max_lag.as_secs_f64() * 1e3
+        ));
+        fig.note(
+            format!("{:.0}% load: concurrency limit range / max lag", frac * 100.0),
+            format!("{min_limit}-{max_limit} / {:.1} ms", max_lag.as_secs_f64() * 1e3),
+        );
         fig.push("p50", rate, p50);
         fig.push("p90", rate, p90);
         fig.push("p99", rate, p99);
@@ -218,6 +236,7 @@ pub fn chain_latency(o: &Opts) -> Figure {
         "Steps",
         "Median submit-to-finish latency (ms)",
     );
+    fig.higher_is_better = false;
     fig.subtitle = "One job in flight at a time on an idle worker; median of repeated runs".into();
     fig.x_scale = Scale::Log2;
     let shapes: [(&str, ShapeFn); 3] = [
@@ -238,6 +257,7 @@ pub fn chain_latency_io(o: &Opts) -> Figure {
         "Steps",
         "Median submit-to-finish latency (ms)",
     );
+    fig.higher_is_better = false;
     fig.subtitle = "A chain pays every step's wait in sequence; independent tasks wait in parallel".into();
     fig.x_scale = Scale::Log2;
     fig.y_scale = Scale::Log10;
@@ -406,6 +426,7 @@ pub fn lease_starvation(o: &Opts) -> Figure {
         "Concurrency limit per worker (4 runtime threads each)",
         "Duplicate executions (% of tasks)",
     );
+    fig.higher_is_better = false;
     fig.subtitle = "2 workers, 600 ms CPU tasks, 300 ms lease (heartbeat every 100 ms)".into();
     fig.x_scale = Scale::Log2;
     fig.y_format = Format::Percent;
@@ -488,5 +509,96 @@ pub fn worker_scaling(o: &Opts) -> Figure {
     for &w in &workers {
         ideal.points.push((w as f64, (w * 32) as f64 / wait));
     }
+    fig
+}
+
+/// One worker with 4 runtime threads and a 32-task limit, fed 50 ms tasks that compute on the
+/// runtime; samples the worker's stats every 50 ms until the queue drains.
+fn pushback_timeline(o: &Opts, adaptive: bool) -> (Vec<(f64, WorkerStats)>, f64) {
+    let iters = calibrate_burn(Duration::from_millis(50));
+    let spec = ClusterSpec {
+        threads: 4,
+        lease: Duration::from_millis(500),
+        adaptive,
+        ..ClusterSpec::new(32, Work::CpuInline(iters))
+    };
+    let jobs = o.jobs(400.0, 80, 400);
+    let ns = fresh_ns();
+    let rec = Recorder::new();
+    let rt = driver();
+    rt.block_on(async {
+        let q = connect(&ns).await;
+        preload(&q, Shape::Task, jobs, 0).await;
+    });
+    let cluster = Cluster::start(spec, &ns, &rec);
+    let samples = rt.block_on(async {
+        let start = Instant::now();
+        let mut samples = Vec::new();
+        while rec.completed() < jobs && start.elapsed() < Duration::from_secs(60) {
+            samples.push((start.elapsed().as_secs_f64(), cluster.stats()));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        samples
+    });
+    cluster.stop();
+    rt.block_on(cleanup(&ns));
+    (samples, rec.rate())
+}
+
+/// The concurrency limit adapting to a runtime overloaded by CPU work.
+pub fn pushback_limit(o: &Opts) -> Figure {
+    let mut fig = Figure::new(
+        "pushback_limit",
+        "Pushback: concurrency limit under CPU work on the runtime",
+        "Time (s)",
+        "Tasks",
+    );
+    fig.subtitle = "1 worker, 4 runtime threads, limit 32; 50 ms tasks computing on the runtime; 50 ms lag budget".into();
+    let (samples, rate) = pushback_timeline(o, true);
+    for (t, s) in &samples {
+        fig.push("concurrency limit", *t, s.concurrency_limit as f64);
+        fig.push("in flight", *t, s.in_flight as f64);
+    }
+    let max = fig.series("configured maximum");
+    max.reference = true;
+    if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+        max.points = vec![(first.0, 32.0), (last.0, 32.0)];
+    }
+    fig.note("tasks_per_s", format!("{rate:.0}"));
+    log(format!("pushback on: {rate:.0} tasks/s, {} samples", samples.len()));
+    fig
+}
+
+/// Scheduling lag over time for the same workload, with and without pushback.
+pub fn pushback_lag(o: &Opts) -> Figure {
+    let mut fig = Figure::new(
+        "pushback_lag",
+        "Pushback: scheduling lag under CPU work on the runtime",
+        "Time (s)",
+        "Scheduling lag (ms)",
+    );
+    fig.subtitle = "Same workload as the limit chart; lag is how long a ready task waits for a runtime thread".into();
+    fig.y_scale = Scale::Log10;
+    fig.higher_is_better = false;
+    let mut end = 0.0f64;
+    for (name, adaptive) in [("pushback on", true), ("pushback off", false)] {
+        let (samples, rate) = pushback_timeline(o, adaptive);
+        let lags: Vec<f64> = samples.iter().map(|(_, s)| s.scheduling_lag.as_secs_f64() * 1e3).collect();
+        let mut sorted = lags.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for ((t, _), lag) in samples.iter().zip(&lags) {
+            // Log scale: show sub-0.1 ms samples at 0.1 ms.
+            fig.push(name, *t, lag.max(0.1));
+        }
+        end = end.max(samples.last().map(|s| s.0).unwrap_or(0.0));
+        let (p50, p99) = (percentile(&sorted, 0.5), percentile(&sorted, 0.99));
+        log(format!("{name}: {rate:.0} tasks/s, lag p50 {p50:.1} ms, p99 {p99:.1} ms"));
+        fig.note(format!("{name} tasks_per_s"), format!("{rate:.0}"));
+        fig.note(format!("{name} lag_p50_ms"), format!("{p50:.1}"));
+        fig.note(format!("{name} lag_p99_ms"), format!("{p99:.1}"));
+    }
+    let budget = fig.series("lag budget (50 ms)");
+    budget.reference = true;
+    budget.points = vec![(0.0, 50.0), (end, 50.0)];
     fig
 }

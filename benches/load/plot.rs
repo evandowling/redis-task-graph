@@ -10,7 +10,7 @@ use std::path::Path;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
-use crate::figure::{Figure, Format, Scale, format_value};
+use crate::figure::{Figure, Format, Scale, Series, format_value};
 
 struct Theme {
     surface: RGBColor,
@@ -56,7 +56,7 @@ const FONT: &str = "sans-serif";
 
 /// Writes `<id>.svg` (light) and `<id>-dark.svg` into `dir`.
 pub fn render(fig: &Figure, dir: &Path) -> Result<(), Box<dyn Error>> {
-    let colored = fig.series.iter().filter(|s| !s.reference).count();
+    let colored = fig.series.iter().filter(|s| s.is_primary()).count();
     assert!(colored <= 3, "{}: at most three colored series per chart", fig.id);
     draw(fig, &dir.join(format!("{}.svg", fig.id)), &LIGHT)?;
     draw(fig, &dir.join(format!("{}-dark.svg", fig.id)), &DARK)?;
@@ -133,9 +133,14 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
         .pos(Pos::new(HPos::Left, VPos::Center));
     let mut lx = 28;
     let ly = 86;
-    let mut slot = 0;
-    for s in &fig.series {
-        let (color, dashed) = series_color(s.reference, &mut slot, theme);
+    let has_baselines = fig.series.iter().any(|s| s.baseline_of.is_some());
+    let legend_entries = fig
+        .series
+        .iter()
+        .filter(|s| s.baseline_of.is_none())
+        .map(|s| (s.name.clone(), series_style(fig, s, theme)))
+        .chain(has_baselines.then(|| ("previous run (dashed)".to_string(), (theme.reference, true))));
+    for (name, (color, dashed)) in legend_entries {
         if dashed {
             for i in 0..3 {
                 root.draw(&PathElement::new(
@@ -147,8 +152,8 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
             root.draw(&PathElement::new(vec![(lx, ly), (lx + 24, ly)], color.stroke_width(2)))?;
             root.draw(&Circle::new((lx + 12, ly), 4, color.filled()))?;
         }
-        root.draw(&Text::new(s.name.clone(), (lx + 32, ly), legend_font.clone()))?;
-        lx += 32 + (s.name.chars().count() as i32 * 8) + 28;
+        root.draw(&Text::new(name.clone(), (lx + 32, ly), legend_font.clone()))?;
+        lx += 32 + (name.chars().count() as i32 * 8) + 28;
     }
 
     let (_, plot_area) = root.split_vertically(104);
@@ -190,13 +195,12 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
         .y_desc(fig.y_label.clone())
         .draw()?;
 
-    // Reference lines first so data marks sit on top of them.
+    // Dashed lines first so data marks sit on top of them.
     let mut ends = Vec::new();
-    for pass_reference in [true, false] {
-        let mut slot = 0;
+    for pass_dashed in [true, false] {
         for s in &fig.series {
-            let (color, dashed) = series_color(s.reference, &mut slot, theme);
-            if s.reference != pass_reference || s.points.is_empty() {
+            let (color, dashed) = series_style(fig, s, theme);
+            if dashed != pass_dashed || s.points.is_empty() {
                 continue;
             }
             let pts: Vec<(f64, f64)> = s
@@ -213,7 +217,9 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
                 chart.draw_series(pts.iter().map(|&p| Circle::new(p, 6, theme.surface.filled())))?;
                 chart.draw_series(pts.iter().map(|&p| Circle::new(p, 4, color.filled())))?;
             }
-            if let Some(&last) = pts.last() {
+            if let Some(&last) = pts.last()
+                && s.baseline_of.is_none()
+            {
                 ends.push((chart.backend_coord(&last), s.name.clone()));
             }
         }
@@ -241,12 +247,21 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-fn series_color(reference: bool, slot: &mut usize, theme: &Theme) -> (RGBColor, bool) {
-    if reference {
+/// Color and dashing for a series. Primary series take categorical slots in order; a baseline
+/// reuses its series' color, dashed; reference lines are dashed neutral ink.
+fn series_style(fig: &Figure, s: &Series, theme: &Theme) -> (RGBColor, bool) {
+    let slot = |name: &str| {
+        fig.series
+            .iter()
+            .filter(|p| p.is_primary())
+            .position(|p| p.name == name)
+            .map(|i| theme.series[i % theme.series.len()])
+    };
+    if s.reference {
         (theme.reference, true)
+    } else if let Some(of) = &s.baseline_of {
+        (slot(of).unwrap_or(theme.reference), true)
     } else {
-        let c = theme.series[*slot % theme.series.len()];
-        *slot += 1;
-        (c, false)
+        (slot(&s.name).unwrap_or(theme.reference), false)
     }
 }

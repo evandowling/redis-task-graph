@@ -8,15 +8,15 @@ Preloaded queue of no-op tasks drained by N workers (4 runtime threads each)
 
 | Concurrency limit per worker | 1 worker | 2 workers | 4 workers |
 |---|---:|---:|---:|
-| 1 | 7.4k | 14k | 18k |
-| 2 | 12k | 17k | 21k |
-| 4 | 18k | 26k | 33k |
-| 8 | 29k | 44k | 49k |
-| 16 | 42k | 56k | 60k |
-| 32 | 55k | 64k | 71k |
-| 64 | 64k | 75k | 82k |
-| 128 | 70k | 78k | 91k |
-| 256 | 75k | 91k | 95k |
+| 1 | 7.8k | 13k | 16k |
+| 2 | 12k | 15k | 19k |
+| 4 | 18k | 28k | 32k |
+| 8 | 27k | 39k | 48k |
+| 16 | 37k | 46k | 59k |
+| 32 | 48k | 58k | 69k |
+| 64 | 52k | 69k | 74k |
+| 128 | 57k | 72k | 83k |
+| 256 | 60k | 88k | 88k |
 
 ## Submission throughput vs. concurrent producers (`submit_throughput`)
 
@@ -24,31 +24,38 @@ A chain submit writes its status hash and first step in one MULTI
 
 | Concurrent producers | task | 4-step chain |
 |---|---:|---:|
-| 1 | 28k | 23k |
-| 2 | 44k | 38k |
-| 4 | 58k | 51k |
-| 8 | 102k | 91k |
-| 16 | 202k | 119k |
-| 32 | 281k | 177k |
-| 64 | 404k | 205k |
-| 128 | 496k | 199k |
-| 256 | 575k | 200k |
+| 1 | 25k | 23k |
+| 2 | 42k | 33k |
+| 4 | 55k | 46k |
+| 8 | 110k | 77k |
+| 16 | 178k | 123k |
+| 32 | 316k | 136k |
+| 64 | 385k | 189k |
+| 128 | 453k | 212k |
+| 256 | 493k | 157k |
 
 ## End-to-end latency vs. offered load (`latency_under_load`)
 
-One worker, concurrency 64; drain capacity measured at 57076 tasks/s
+One worker, concurrency 64; drain capacity measured at 51406 tasks/s
 
 | Offered load (tasks / s) | p50 | p90 | p99 |
 |---|---:|---:|---:|
-| 5.7k | 0.96 | 2.10 | 2.69 |
-| 14k | 2.28 | 3.91 | 5.16 |
-| 29k | 4.18 | 6.93 | 8.49 |
-| 40k | 5.99 | 9.68 | 11.9 |
-| 49k | 7.32 | 11.5 | 14.7 |
-| 54k | 67.0 | 116 | 124 |
-| 63k | 436 | 698 | 725 |
+| 5.1k | 0.88 | 1.94 | 2.76 |
+| 13k | 2.12 | 3.65 | 4.95 |
+| 26k | 3.93 | 6.43 | 7.74 |
+| 36k | 5.54 | 8.90 | 11.2 |
+| 44k | 6.62 | 10.7 | 12.7 |
+| 49k | 10.4 | 22.9 | 32.7 |
+| 57k | 267 | 485 | 505 |
 
-- drain_capacity_tasks_per_s: 57076
+- drain_capacity_tasks_per_s: 51406
+- 10% load: concurrency limit range / max lag: 8-64 / 0.5 ms
+- 25% load: concurrency limit range / max lag: 8-64 / 0.7 ms
+- 50% load: concurrency limit range / max lag: 8-64 / 1.4 ms
+- 70% load: concurrency limit range / max lag: 8-64 / 2.4 ms
+- 85% load: concurrency limit range / max lag: 8-64 / 2.3 ms
+- 95% load: concurrency limit range / max lag: 8-64 / 2.1 ms
+- 110% load: concurrency limit range / max lag: 8-64 / 2.3 ms
 
 ## Unloaded latency vs. chain length (no-op steps) (`chain_latency`)
 
@@ -56,31 +63,31 @@ One job in flight at a time on an idle worker; median of repeated runs
 
 | Steps | chain | DIY chain (step submits next) | independent tasks (parallel) |
 |---|---:|---:|---:|
-| 1 | 0.33 | 0.32 | 0.39 |
-| 2 | 0.58 | 0.50 | 0.49 |
-| 4 | 1.06 | 0.96 | 0.87 |
-| 8 | 1.58 | 1.41 | 1.40 |
-| 16 | 2.59 | 2.46 | 2.15 |
-| 32 | 4.42 | 4.00 | 3.66 |
+| 1 | 0.30 | 0.32 | 0.28 |
+| 2 | 0.56 | 0.49 | 0.45 |
+| 4 | 0.96 | 0.96 | 0.88 |
+| 8 | 1.60 | 1.49 | 1.40 |
+| 16 | 2.31 | 2.51 | 2.26 |
+| 32 | 4.32 | 3.90 | 4.01 |
 
-- chain len=1 p90_ms: 0.48
-- chain len=2 p90_ms: 0.75
-- chain len=4 p90_ms: 1.41
-- chain len=8 p90_ms: 2.04
-- chain len=16 p90_ms: 3.12
-- chain len=32 p90_ms: 5.09
-- DIY chain (step submits next) len=1 p90_ms: 0.43
-- DIY chain (step submits next) len=2 p90_ms: 0.70
-- DIY chain (step submits next) len=4 p90_ms: 1.39
-- DIY chain (step submits next) len=8 p90_ms: 1.75
-- DIY chain (step submits next) len=16 p90_ms: 2.79
-- DIY chain (step submits next) len=32 p90_ms: 5.01
-- independent tasks (parallel) len=1 p90_ms: 0.50
-- independent tasks (parallel) len=2 p90_ms: 0.64
-- independent tasks (parallel) len=4 p90_ms: 1.10
-- independent tasks (parallel) len=8 p90_ms: 1.88
-- independent tasks (parallel) len=16 p90_ms: 2.80
-- independent tasks (parallel) len=32 p90_ms: 4.37
+- chain len=1 p90_ms: 0.57
+- chain len=2 p90_ms: 0.74
+- chain len=4 p90_ms: 1.32
+- chain len=8 p90_ms: 1.83
+- chain len=16 p90_ms: 2.94
+- chain len=32 p90_ms: 4.88
+- DIY chain (step submits next) len=1 p90_ms: 0.47
+- DIY chain (step submits next) len=2 p90_ms: 0.60
+- DIY chain (step submits next) len=4 p90_ms: 1.22
+- DIY chain (step submits next) len=8 p90_ms: 1.90
+- DIY chain (step submits next) len=16 p90_ms: 3.71
+- DIY chain (step submits next) len=32 p90_ms: 4.54
+- independent tasks (parallel) len=1 p90_ms: 0.43
+- independent tasks (parallel) len=2 p90_ms: 0.56
+- independent tasks (parallel) len=4 p90_ms: 1.12
+- independent tasks (parallel) len=8 p90_ms: 2.04
+- independent tasks (parallel) len=16 p90_ms: 2.67
+- independent tasks (parallel) len=32 p90_ms: 4.66
 
 ## Unloaded latency vs. chain length (5 ms I/O wait per step) (`chain_latency_io`)
 
@@ -88,25 +95,25 @@ A chain pays every step's wait in sequence; independent tasks wait in parallel
 
 | Steps | chain | independent tasks (parallel) | steps × 5 ms |
 |---|---:|---:|---:|
-| 1 | 5.67 | 5.66 | 5 |
-| 2 | 11.4 | 5.73 | 10 |
-| 4 | 22.4 | 6.18 | 20 |
-| 8 | 45.1 | 6.55 | 40 |
-| 16 | 89.8 | 7.22 | 80 |
-| 32 | 180 | 8.37 | 160 |
+| 1 | 5.74 | 5.67 | 5 |
+| 2 | 11.3 | 5.75 | 10 |
+| 4 | 22.5 | 6.22 | 20 |
+| 8 | 44.8 | 6.54 | 40 |
+| 16 | 89.8 | 7.15 | 80 |
+| 32 | 179 | 8.26 | 160 |
 
-- chain len=1 p90_ms: 5.83
-- chain len=2 p90_ms: 11.62
-- chain len=4 p90_ms: 22.89
-- chain len=8 p90_ms: 45.63
-- chain len=16 p90_ms: 90.87
-- chain len=32 p90_ms: 181.68
-- independent tasks (parallel) len=1 p90_ms: 5.87
-- independent tasks (parallel) len=2 p90_ms: 5.99
-- independent tasks (parallel) len=4 p90_ms: 6.38
-- independent tasks (parallel) len=8 p90_ms: 6.82
-- independent tasks (parallel) len=16 p90_ms: 7.78
-- independent tasks (parallel) len=32 p90_ms: 8.88
+- chain len=1 p90_ms: 5.84
+- chain len=2 p90_ms: 11.59
+- chain len=4 p90_ms: 22.96
+- chain len=8 p90_ms: 45.65
+- chain len=16 p90_ms: 90.59
+- chain len=32 p90_ms: 181.16
+- independent tasks (parallel) len=1 p90_ms: 5.82
+- independent tasks (parallel) len=2 p90_ms: 6.17
+- independent tasks (parallel) len=4 p90_ms: 6.43
+- independent tasks (parallel) len=8 p90_ms: 6.85
+- independent tasks (parallel) len=16 p90_ms: 7.61
+- independent tasks (parallel) len=32 p90_ms: 8.96
 
 ## Step throughput under load vs. chain length (no-op steps) (`chain_throughput`)
 
@@ -114,12 +121,12 @@ Same total number of steps at every point; one worker, concurrency 64; median of
 
 | Steps per job | independent tasks | chain | DIY chain (step submits next) |
 |---|---:|---:|---:|
-| 1 | 57k | 47k | 58k |
-| 2 | 58k | 47k | 55k |
-| 4 | 57k | 45k | 54k |
-| 8 | 57k | 46k | 54k |
-| 16 | 58k | 48k | 53k |
-| 32 | 58k | 47k | 51k |
+| 1 | 53k | 42k | 52k |
+| 2 | 53k | 43k | 50k |
+| 4 | 53k | 42k | 51k |
+| 8 | 53k | 44k | 50k |
+| 16 | 52k | 43k | 50k |
+| 32 | 53k | 44k | 50k |
 
 ## Step throughput under load vs. chain length (10 ms I/O wait per step) (`chain_throughput_io`)
 
@@ -127,12 +134,12 @@ One worker, concurrency 256; same total number of steps at every point
 
 | Steps per job | independent tasks | chain | ideal: 256 ÷ wait |
 |---|---:|---:|---:|
-| 1 | 21k | 20k | 25k |
-| 2 | 21k | 21k | 25k |
-| 4 | 21k | 21k | 25k |
+| 1 | 20k | 20k | 25k |
+| 2 | 20k | 20k | 25k |
+| 4 | 21k | 20k | 25k |
 | 8 | 21k | 21k | 25k |
-| 16 | 21k | 22k | 25k |
-| 32 | 21k | 22k | 25k |
+| 16 | 20k | 21k | 25k |
+| 32 | 20k | 21k | 25k |
 
 ## I/O-bound tasks (20 ms wait) vs. concurrency (`io_bound`)
 
@@ -140,14 +147,14 @@ One worker, 8 runtime threads; each task waits 20 ms on simulated I/O
 
 | Concurrency limit | async wait | spawn_blocking | blocking on runtime | ideal: concurrency ÷ wait |
 |---|---:|---:|---:|---:|
-| 1 | 48.3 | 48.2 | 48.2 | 49.2 |
-| 4 | 193 | 192 | 192 | 197 |
-| 16 | 771 | 770 | 390 | 787 |
-| 64 | 3k | 3.1k | 391 | 3.1k |
-| 256 | 12k | 12k | 391 | 13k |
-| 1k | 44k | 25k | 391 | 50k |
+| 1 | 48.4 | 48.1 | 48.2 | 49.4 |
+| 4 | 193 | 191 | 191 | 198 |
+| 16 | 772 | 770 | 389 | 790 |
+| 64 | 3k | 3k | 390 | 3.2k |
+| 256 | 12k | 12k | 390 | 13k |
+| 1k | 39k | 24k | 390 | 51k |
 
-- measured_io_wait_20ms: 20.34 ms
+- measured_io_wait_20ms: 20.24 ms
 
 ## CPU-bound tasks (5 ms compute) vs. concurrency (`cpu_bound`)
 
@@ -155,15 +162,15 @@ One worker, 16 runtime threads, 16 hardware threads
 
 | Concurrency limit | compute on runtime | spawn_blocking | ideal: min(concurrency, 16) ÷ 5 ms |
 |---|---:|---:|---:|
-| 1 | 152 | 187 | 200 |
-| 2 | 296 | 361 | 400 |
-| 4 | 556 | 690 | 800 |
-| 8 | 1k | 1.3k | 1.6k |
-| 16 | 1.6k | 2.1k | 3.2k |
-| 32 | 1.7k | 2.2k | 3.2k |
-| 64 | 1.7k | 2.2k | 3.2k |
+| 1 | 140 | 197 | 200 |
+| 2 | 275 | 386 | 400 |
+| 4 | 515 | 723 | 800 |
+| 8 | 979 | 1.4k | 1.6k |
+| 16 | 1.6k | 2.2k | 3.2k |
+| 32 | 1.7k | 2.3k | 3.2k |
+| 64 | 1.6k | 2.3k | 3.2k |
 
-- burn_iterations_for_5ms: 3262090
+- burn_iterations_for_5ms: 3140426
 - hardware_threads: 16
 
 ## Duplicate executions when CPU work starves heartbeats (`lease_starvation`)
@@ -174,13 +181,13 @@ One worker, 16 runtime threads, 16 hardware threads
 |---|---:|---:|
 | 1 | 0% | 0% |
 | 2 | 0% | 0% |
-| 4 | 19% | 0% |
-| 8 | 16% | 0% |
+| 4 | 0% | 0% |
+| 8 | 0% | 0% |
 
 - compute on runtime c=1 executions/tasks: 32/32
 - compute on runtime c=2 executions/tasks: 32/32
-- compute on runtime c=4 executions/tasks: 38/32
-- compute on runtime c=8 executions/tasks: 37/32
+- compute on runtime c=4 executions/tasks: 32/32
+- compute on runtime c=8 executions/tasks: 32/32
 - spawn_blocking c=1 executions/tasks: 32/32
 - spawn_blocking c=2 executions/tasks: 32/32
 - spawn_blocking c=4 executions/tasks: 32/32
@@ -192,25 +199,25 @@ No-op steps, concurrency 16; a chain passes the full payload to every step throu
 
 | Context size | task | 4-step chain |
 |---|---:|---:|
-| 64 B | 39k | 31k |
-| 1 KB | 37k | 29k |
-| 8 KB | 27k | 21k |
-| 64 KB | 9.7k | 5k |
-| 256 KB | 2.2k | 554 |
-| 512 KB | 1.1k | 400 |
+| 64 B | 37k | 30k |
+| 1 KB | 32k | 28k |
+| 8 KB | 23k | 21k |
+| 64 KB | 9.3k | 5.1k |
+| 256 KB | 3.2k | 514 |
+| 512 KB | 1k | 440 |
 
-- task 64B MB/s: 2.4
-- task 1024B MB/s: 35.7
-- task 8192B MB/s: 209.6
-- task 65536B MB/s: 603.7
-- task 262144B MB/s: 537.9
-- task 524288B MB/s: 536.9
-- 4-step chain 64B MB/s: 1.9
-- 4-step chain 1024B MB/s: 28.2
-- 4-step chain 8192B MB/s: 167.6
-- 4-step chain 65536B MB/s: 312.1
-- 4-step chain 262144B MB/s: 138.6
-- 4-step chain 524288B MB/s: 199.9
+- task 64B MB/s: 2.2
+- task 1024B MB/s: 31.6
+- task 8192B MB/s: 181.5
+- task 65536B MB/s: 583.6
+- task 262144B MB/s: 788.0
+- task 524288B MB/s: 513.1
+- 4-step chain 64B MB/s: 1.8
+- 4-step chain 1024B MB/s: 27.2
+- 4-step chain 8192B MB/s: 164.7
+- 4-step chain 65536B MB/s: 315.8
+- 4-step chain 262144B MB/s: 128.6
+- 4-step chain 524288B MB/s: 220.1
 
 ## Throughput vs. number of workers (`worker_scaling`)
 
@@ -218,7 +225,407 @@ No-op tasks are bound by Redis round trips; 10 ms async waits by concurrency
 
 | Workers (2 runtime threads, concurrency 32 each) | no-op | 10 ms async wait | ideal: workers × 32 ÷ wait |
 |---|---:|---:|---:|
-| 1 | 58k | 3k | 3.1k |
-| 2 | 63k | 6k | 6.2k |
-| 4 | 72k | 11k | 12k |
-| 8 | 67k | 20k | 25k |
+| 1 | 50k | 3k | 3.1k |
+| 2 | 57k | 5.8k | 6.2k |
+| 4 | 56k | 11k | 12k |
+| 8 | 60k | 19k | 25k |
+
+## Pushback: concurrency limit under CPU work on the runtime (`pushback_limit`)
+
+1 worker, 4 runtime threads, limit 32; 50 ms tasks computing on the runtime; 50 ms lag budget
+
+| Time (s) | concurrency limit | in flight | configured maximum |
+|---|---:|---:|---:|
+| 0.00 | 4 | 0 | 32 |
+| 0.06 | 8 | 4 |  |
+| 0.12 | 5 | 5 |  |
+| 0.18 | 3 | 3 |  |
+| 0.24 | 5 | 4 |  |
+| 0.30 | 3 | 3 |  |
+| 0.37 | 5 | 4 |  |
+| 0.43 | 7 | 6 |  |
+| 0.49 | 9 | 7 |  |
+| 0.55 | 7 | 6 |  |
+| 0.61 | 4 | 4 |  |
+| 0.68 | 6 | 6 |  |
+| 0.74 | 6 | 5 |  |
+| 0.80 | 5 | 4 |  |
+| 0.86 | 5 | 4 |  |
+| 0.92 | 6 | 6 |  |
+| 0.98 | 4 | 6 |  |
+| 1.05 | 6 | 5 |  |
+| 1.11 | 5 | 4 |  |
+| 1.17 | 5 | 4 |  |
+| 1.23 | 7 | 5 |  |
+| 1.30 | 8 | 7 |  |
+| 1.36 | 9 | 8 |  |
+| 1.42 | 10 | 8 |  |
+| 1.48 | 12 | 10 |  |
+| 1.55 | 8 | 9 |  |
+| 1.61 | 6 | 8 |  |
+| 1.67 | 8 | 7 |  |
+| 1.73 | 6 | 5 |  |
+| 1.79 | 4 | 5 |  |
+| 1.86 | 7 | 6 |  |
+| 1.92 | 9 | 8 |  |
+| 1.98 | 6 | 9 |  |
+| 2.04 | 7 | 7 |  |
+| 2.10 | 5 | 6 |  |
+| 2.17 | 7 | 7 |  |
+| 2.23 | 9 | 8 |  |
+| 2.29 | 10 | 9 |  |
+| 2.35 | 10 | 9 |  |
+| 2.42 | 11 | 8 |  |
+| 2.48 | 8 | 7 |  |
+| 2.54 | 9 | 9 |  |
+| 2.60 | 11 | 10 |  |
+| 2.67 | 7 | 11 |  |
+| 2.73 | 8 | 7 |  |
+| 2.79 | 10 | 8 |  |
+| 2.85 | 10 | 10 |  |
+| 2.91 | 13 | 12 |  |
+| 2.97 | 9 | 12 |  |
+| 3.04 | 10 | 11 |  |
+| 3.10 | 11 | 11 |  |
+| 3.16 | 7 | 11 |  |
+| 3.22 | 9 | 8 |  |
+| 3.29 | 7 | 7 |  |
+| 3.35 | 9 | 8 |  |
+| 3.41 | 7 | 6 |  |
+| 3.47 | 9 | 7 |  |
+| 3.54 | 10 | 10 |  |
+| 3.60 | 11 | 10 |  |
+| 3.66 | 14 | 9 |  |
+| 3.72 | 16 | 14 |  |
+| 3.78 | 11 | 13 |  |
+| 3.85 | 12 | 8 |  |
+| 3.91 | 13 | 12 |  |
+| 3.97 | 14 | 13 |  |
+| 4.03 | 15 | 12 |  |
+| 4.09 | 10 | 12 |  |
+| 4.16 | 11 | 10 |  |
+| 4.22 | 7 | 9 |  |
+| 4.28 | 4 | 7 |  |
+| 4.34 | 5 | 5 |  |
+| 4.41 | 7 | 7 |  |
+| 4.47 | 8 | 8 |  |
+| 4.53 | 10 | 9 |  |
+| 4.59 | 12 | 10 |  |
+| 4.66 | 12 | 12 |  |
+| 4.72 | 12 | 11 |  |
+| 4.78 | 14 | 12 |  |
+| 4.84 | 9 | 12 |  |
+| 4.91 | 10 | 8 |  |
+| 4.97 | 8 | 8 |  |
+| 5.03 | 10 | 9 |  |
+| 5.09 | 11 | 10 |  |
+| 5.15 | 7 | 10 |  |
+| 5.22 | 8 | 8 |  |
+| 5.28 | 10 | 8 |  |
+| 5.34 | 11 | 8 |  |
+| 5.40 | 13 | 11 |  |
+| 5.47 | 9 | 12 |  |
+| 5.53 | 10 | 10 |  |
+| 5.59 | 8 | 7 |  |
+| 5.65 | 9 | 9 |  |
+| 5.71 | 12 | 11 |  |
+| 5.78 | 8 | 11 |  |
+| 5.84 | 8 | 8 |  |
+| 5.90 | 9 | 9 |  |
+| 5.96 | 8 | 7 |  |
+| 6.02 | 9 | 8 |  |
+| 6.08 | 10 | 8 |  |
+| 6.15 | 12 | 11 |  |
+| 6.21 | 12 | 11 |  |
+| 6.27 | 8 | 10 |  |
+| 6.33 | 10 | 9 |  |
+| 6.40 | 7 | 9 |  |
+| 6.46 | 10 | 8 |  |
+| 6.52 | 12 | 10 |  |
+| 6.58 | 13 | 11 |  |
+| 6.64 | 14 | 10 |  |
+| 6.71 | 16 | 14 |  |
+| 6.77 | 17 | 15 |  |
+| 6.83 | 12 | 14 |  |
+| 6.89 | 8 | 10 |  |
+| 6.96 | 8 | 8 |  |
+| 7.02 | 9 | 9 |  |
+| 7.08 | 10 | 9 |  |
+| 7.14 | 7 | 9 |  |
+| 7.21 | 10 | 8 |  |
+| 7.27 | 8 | 7 |  |
+| 7.33 | 9 | 8 |  |
+| 7.39 | 12 | 10 |  |
+| 7.46 | 12 | 10 |  |
+| 7.52 | 12 | 5 | 32 |
+
+- tasks_per_s: 53
+
+## Pushback: scheduling lag under CPU work on the runtime (`pushback_lag`)
+
+Same workload as the limit chart; lag is how long a ready task waits for a runtime thread
+
+| Time (s) | pushback on | pushback off | lag budget (50 ms) |
+|---|---:|---:|---:|
+| 0 |  |  | 50 |
+| 0.00 |  | 0.10 |  |
+| 0.00 | 0.10 |  |  |
+| 0.06 |  | 41.0 |  |
+| 0.06 | 51.7 |  |  |
+| 0.12 |  | 31.3 |  |
+| 0.12 | 30.5 |  |  |
+| 0.18 |  | 93.4 |  |
+| 0.19 | 0.10 |  |  |
+| 0.24 |  | 231 |  |
+| 0.25 | 10.2 |  |  |
+| 0.31 |  | 218 |  |
+| 0.31 | 0.10 |  |  |
+| 0.37 |  | 283 |  |
+| 0.37 | 51.2 |  |  |
+| 0.43 |  | 344 |  |
+| 0.43 | 30.8 |  |  |
+| 0.49 |  | 20.6 |  |
+| 0.50 | 20.5 |  |  |
+| 0.55 |  | 10.1 |  |
+| 0.56 | 10.3 |  |  |
+| 0.62 |  | 70.2 |  |
+| 0.62 | 0.10 |  |  |
+| 0.68 |  | 51.9 |  |
+| 0.68 | 48.3 |  |  |
+| 0.74 |  | 41.6 |  |
+| 0.74 | 41.2 |  |  |
+| 0.80 |  | 107 |  |
+| 0.80 | 30.9 |  |  |
+| 0.87 |  | 246 |  |
+| 0.87 | 0.10 |  |  |
+| 0.93 |  | 229 |  |
+| 0.93 | 15.5 |  |  |
+| 0.99 |  | 33.6 |  |
+| 0.99 | 43.6 |  |  |
+| 1.05 |  | 20.6 |  |
+| 1.05 | 41.2 |  |  |
+| 1.11 |  | 10.2 |  |
+| 1.11 | 20.7 |  |  |
+| 1.17 |  | 63.1 |  |
+| 1.18 | 10.6 |  |  |
+| 1.24 |  | 41.2 |  |
+| 1.24 | 7.95 |  |  |
+| 1.30 |  | 21.0 |  |
+| 1.30 | 10.1 |  |  |
+| 1.36 |  | 10.6 |  |
+| 1.36 | 41.3 |  |  |
+| 1.42 |  | 74.6 |  |
+| 1.43 | 30.4 |  |  |
+| 1.48 |  | 51.1 |  |
+| 1.49 | 10.2 |  |  |
+| 1.55 |  | 32.0 |  |
+| 1.55 | 0.10 |  |  |
+| 1.61 |  | 20.4 |  |
+| 1.61 | 10.2 |  |  |
+| 1.67 |  | 163 |  |
+| 1.67 | 41.1 |  |  |
+| 1.73 |  | 63.0 |  |
+| 1.73 | 20.6 |  |  |
+| 1.79 |  | 51.3 |  |
+| 1.80 | 10.4 |  |  |
+| 1.85 |  | 31.4 |  |
+| 1.86 | 16.6 |  |  |
+| 1.92 |  | 10.3 |  |
+| 1.92 | 9.66 |  |  |
+| 1.98 |  | 156 |  |
+| 1.99 | 41.8 |  |  |
+| 2.04 |  | 52.5 |  |
+| 2.05 | 41.5 |  |  |
+| 2.10 |  | 41.0 |  |
+| 2.11 | 20.6 |  |  |
+| 2.17 |  | 22.8 |  |
+| 2.17 | 10.3 |  |  |
+| 2.23 |  | 10.2 |  |
+| 2.24 | 10.3 |  |  |
+| 2.29 |  | 309 |  |
+| 2.30 | 72.1 |  |  |
+| 2.35 |  | 52.4 |  |
+| 2.36 | 41.4 |  |  |
+| 2.42 |  | 30.4 |  |
+| 2.42 | 31.0 |  |  |
+| 2.48 |  | 10.3 |  |
+| 2.49 | 10.3 |  |  |
+| 2.54 |  | 164 |  |
+| 2.55 | 3.80 |  |  |
+| 2.60 |  | 52.0 |  |
+| 2.61 | 3.42 |  |  |
+| 2.67 |  | 30.8 |  |
+| 2.67 | 64.0 |  |  |
+| 2.73 |  | 10.0 |  |
+| 2.73 | 41.1 |  |  |
+| 2.79 |  | 166 |  |
+| 2.79 | 20.5 |  |  |
+| 2.85 |  | 63.9 |  |
+| 2.86 | 10.1 |  |  |
+| 2.91 |  | 40.8 |  |
+| 2.92 | 8.62 |  |  |
+| 2.98 |  | 21.1 |  |
+| 2.98 | 51.6 |  |  |
+| 3.04 |  | 10.2 |  |
+| 3.05 | 41.2 |  |  |
+| 3.10 |  | 152 |  |
+| 3.11 | 31.1 |  |  |
+| 3.16 |  | 51.8 |  |
+| 3.17 | 20.5 |  |  |
+| 3.22 |  | 31.1 |  |
+| 3.23 | 10.7 |  |  |
+| 3.28 |  | 21.6 |  |
+| 3.29 | 1.70 |  |  |
+| 3.35 |  | 241 |  |
+| 3.36 | 55.0 |  |  |
+| 3.41 |  | 51.4 |  |
+| 3.42 | 31.2 |  |  |
+| 3.47 |  | 42.4 |  |
+| 3.48 | 21.3 |  |  |
+| 3.53 |  | 10.2 |  |
+| 3.54 | 10.9 |  |  |
+| 3.59 |  | 80.6 |  |
+| 3.60 | 3.09 |  |  |
+| 3.65 |  | 51.6 |  |
+| 3.67 | 45.2 |  |  |
+| 3.72 |  | 44.0 |  |
+| 3.73 | 41.2 |  |  |
+| 3.78 |  | 20.5 |  |
+| 3.79 | 31.2 |  |  |
+| 3.84 |  | 10.2 |  |
+| 3.85 | 10.1 |  |  |
+| 3.90 |  | 390 |  |
+| 3.92 | 6.48 |  |  |
+| 3.96 |  | 52.0 |  |
+| 3.98 | 10.3 |  |  |
+| 4.03 |  | 30.8 |  |
+| 4.04 | 44.0 |  |  |
+| 4.09 |  | 20.8 |  |
+| 4.10 | 41.1 |  |  |
+| 4.15 |  | 77.8 |  |
+| 4.16 | 30.6 |  |  |
+| 4.21 |  | 63.8 |  |
+| 4.23 | 10.2 |  |  |
+| 4.27 |  | 41.4 |  |
+| 4.29 | 3.31 |  |  |
+| 4.34 |  | 22.6 |  |
+| 4.35 | 12.4 |  |  |
+| 4.40 |  | 238 |  |
+| 4.41 | 49.6 |  |  |
+| 4.46 |  | 315 |  |
+| 4.47 | 31.0 |  |  |
+| 4.53 |  | 43.3 |  |
+| 4.54 | 20.7 |  |  |
+| 4.59 |  | 41.3 |  |
+| 4.60 | 10.8 |  |  |
+| 4.65 |  | 10.5 |  |
+| 4.66 | 5.04 |  |  |
+| 4.71 |  | 2.17 |  |
+| 4.72 | 61.5 |  |  |
+| 4.77 |  | 157 |  |
+| 4.79 | 40.9 |  |  |
+| 4.84 |  | 52.1 |  |
+| 4.85 | 20.5 |  |  |
+| 4.90 |  | 31.1 |  |
+| 4.91 | 10.3 |  |  |
+| 4.96 |  | 11.2 |  |
+| 4.97 | 12.3 |  |  |
+| 5.02 |  | 92.5 |  |
+| 5.03 | 44.0 |  |  |
+| 5.09 |  | 50.9 |  |
+| 5.09 | 41.4 |  |  |
+| 5.15 |  | 30.7 |  |
+| 5.16 | 20.4 |  |  |
+| 5.21 |  | 20.8 |  |
+| 5.22 | 10.2 |  |  |
+| 5.27 |  | 331 |  |
+| 5.28 | 23.3 |  |  |
+| 5.33 |  | 395 |  |
+| 5.34 | 10.3 |  |  |
+| 5.39 |  | 40.8 |  |
+| 5.40 | 41.2 |  |  |
+| 5.45 |  | 20.4 |  |
+| 5.47 | 31.0 |  |  |
+| 5.52 |  | 3.98 |  |
+| 5.53 | 20.7 |  |  |
+| 5.58 |  | 53.3 |  |
+| 5.59 | 3.19 |  |  |
+| 5.64 |  | 51.0 |  |
+| 5.65 | 17.1 |  |  |
+| 5.70 |  | 41.0 |  |
+| 5.72 | 45.1 |  |  |
+| 5.76 |  | 13.1 |  |
+| 5.78 | 40.6 |  |  |
+| 5.83 |  | 10.2 |  |
+| 5.84 | 20.6 |  |  |
+| 5.89 |  | 51.2 |  |
+| 5.90 | 10.3 |  |  |
+| 5.95 |  | 43.7 |  |
+| 5.96 | 8.78 |  |  |
+| 6.01 |  | 20.7 |  |
+| 6.02 | 53.3 |  |  |
+| 6.07 |  | 0.57 |  |
+| 6.09 | 40.9 |  |  |
+| 6.14 |  | 5.14 |  |
+| 6.15 | 41.0 |  |  |
+| 6.20 |  | 52.2 |  |
+| 6.21 | 20.6 |  |  |
+| 6.26 |  | 31.2 |  |
+| 6.27 | 10.3 |  |  |
+| 6.32 |  | 10.7 |  |
+| 6.33 | 10.1 |  |  |
+| 6.38 |  | 237 |  |
+| 6.40 | 42.4 |  |  |
+| 6.45 |  | 54.4 |  |
+| 6.46 | 41.5 |  |  |
+| 6.51 |  | 42.4 |  |
+| 6.52 | 20.6 |  |  |
+| 6.57 |  | 20.5 |  |
+| 6.58 | 10.1 |  |  |
+| 6.63 |  | 177 |  |
+| 6.65 | 1.34 |  |  |
+| 6.69 |  | 246 |  |
+| 6.71 | 48.0 |  |  |
+| 6.75 |  | 51.9 |  |
+| 6.77 | 41.3 |  |  |
+| 6.82 |  | 31.8 |  |
+| 6.83 | 30.9 |  |  |
+| 6.88 |  | 20.7 |  |
+| 6.89 | 10.2 |  |  |
+| 6.94 |  | 159 |  |
+| 6.96 | 3.64 |  |  |
+| 7.00 |  | 222 |  |
+| 7.02 | 54.3 |  |  |
+| 7.06 |  | 41.3 |  |
+| 7.08 | 41.3 |  |  |
+| 7.13 |  | 30.6 |  |
+| 7.14 | 31.1 |  |  |
+| 7.19 |  | 10.2 |  |
+| 7.21 | 10.4 |  |  |
+| 7.25 |  | 163 |  |
+| 7.27 | 7.69 |  |  |
+| 7.32 |  | 235 |  |
+| 7.33 | 54.6 |  |  |
+| 7.38 |  | 41.4 |  |
+| 7.39 | 41.2 |  |  |
+| 7.44 |  | 31.5 |  |
+| 7.45 | 30.6 |  |  |
+| 7.50 |  | 10.1 |  |
+| 7.52 | 20.2 |  |  |
+| 7.56 |  | 153 |  |
+| 7.58 | 3.32 |  |  |
+| 7.63 |  | 52.9 |  |
+| 7.64 | 6.38 |  |  |
+| 7.69 |  | 31.3 |  |
+| 7.75 |  | 10.2 |  |
+| 7.81 |  | 160 |  |
+| 7.88 |  | 63.2 |  |
+| 7.94 |  | 40.7 |  |
+| 8.00 |  | 0.10 | 50 |
+
+- pushback on tasks_per_s: 52
+- pushback on lag_p50_ms: 20.6
+- pushback on lag_p99_ms: 64.0
+- pushback off tasks_per_s: 50
+- pushback off lag_p50_ms: 41.6
+- pushback off lag_p99_ms: 390.1
