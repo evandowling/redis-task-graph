@@ -5,6 +5,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Errors produced by the library itself (not by task processors).
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("redis error: {0}")]
     Redis(#[from] redis::RedisError),

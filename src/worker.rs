@@ -21,6 +21,7 @@ use crate::telemetry::{self, ChainEvent, ClaimSource, Finished};
 
 /// Tuning knobs for a [`Worker`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WorkerConfig {
     /// Maximum number of tasks processed at once by this worker. With adaptive concurrency the
     /// effective limit moves between `min_concurrency` and this value.
@@ -87,6 +88,7 @@ impl WorkerConfig {
 
 /// A snapshot of a worker's load, from [`WorkerHandle::stats`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WorkerStats {
     /// Current concurrency limit; below the configured maximum while pushback is active.
     pub concurrency_limit: usize,
@@ -167,6 +169,18 @@ impl Worker {
 
     pub fn promote_interval(mut self, d: Duration) -> Self {
         self.config.promote_interval = d;
+        self
+    }
+
+    /// How often the monitor thread samples scheduling lag and checks for leases to renew.
+    pub fn probe_interval(mut self, d: Duration) -> Self {
+        self.config.probe_interval = d.max(Duration::from_millis(1));
+        self
+    }
+
+    /// Approximate cap on the dead-letter stream's length.
+    pub fn dead_letter_max_len(mut self, n: usize) -> Self {
+        self.config.dead_letter_max_len = n;
         self
     }
 

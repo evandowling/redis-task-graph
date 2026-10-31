@@ -34,3 +34,8 @@ pub use error::{BoxError, Error, Result};
 pub use registry::Registry;
 pub use task::{ChainLink, IntoTaskType, TaskEnvelope, TaskId, TaskType};
 pub use worker::{Worker, WorkerConfig, WorkerHandle, WorkerStats};
+
+// Dependencies whose types appear in this crate's API, so users can name them at matching versions.
+pub use redis;
+pub use serde_json;
+pub use uuid;

@@ -2,6 +2,15 @@
 name = "redis-task-graph"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "A Redis-backed async task queue with typed task chains, leases, retries and adaptive concurrency"
+license = "MIT"
+readme = "README.md"
+keywords = ["redis", "queue", "tasks", "async", "jobs"]
+categories = ["asynchronous", "concurrency"]
+authors = ["Evan Dowling"]
+# Benchmark results and the local monitoring setup aren't needed to build or use the crate.
+exclude = ["/perf/", "/monitoring/", "/.github/"]
 
 [dependencies]
 futures = "0.3.34"
@@ -34,3 +43,6 @@ otel = ["dep:opentelemetry"]
 [[example]]
 name = "monitored"
 required-features = ["otel"]
+
+[package.metadata.docs.rs]
+all-features = true

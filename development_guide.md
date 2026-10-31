@@ -28,6 +28,7 @@ For the public API and usage, read [`README.md`](README.md) first. Measured numb
 16. [Testing and benchmarking](#16-testing-and-benchmarking)
 17. [Contributor rules of thumb](#17-contributor-rules-of-thumb)
 18. [Known gaps and next steps](#18-known-gaps-and-next-steps)
+19. [Releasing](#19-releasing)
 
 ## 1. Repository map
 
@@ -409,7 +410,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count is 21 integration tests plus unit tests: 42 in total with `--features otel`.
+The current count, with `--features otel`, is 42: 19 integration tests, 19 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 
@@ -478,6 +479,7 @@ git worktree remove ../rtg-baseline
 6. **Library telemetry goes through `telemetry.rs`.** Add a stub to the non-`otel` module too, and an assertion to `tests/telemetry.rs`.
 7. **Measure with `perf/ab.sh`,** and update `performance_readme.md` when a number it quotes changes. The readme notes which commit its text numbers come from.
 8. **Run tests and clippy with and without `--features otel`.**
+9. **Keep the public API semver-friendly.** New public structs and enums that may gain fields or variants get `#[non_exhaustive]`. A type from `redis`, `serde_json` or `uuid` in the public API means a major upgrade of that dependency is a breaking release; the crate re-exports all three so users can match versions.
 
 ## 18. Known gaps and next steps
 
@@ -489,3 +491,15 @@ git worktree remove ../rtg-baseline
 - **Pipelined heartbeats.** Heartbeats are sequential on one sync connection, which bounds long-running tasks per worker at roughly `(lease/3) / RTT`.
 - **Redis Cluster.** Needs hash-tagged keys and a `PROMOTE` that receives its keys rather than deriving them.
 - **Push-based chain completion.** `wait_for_chain` polls; keyspace notifications or a per-chain stream would remove that.
+
+## 19. Releasing
+
+The crate is distributed through crates.io under the MIT license.
+
+1. Move the `[Unreleased]` entries in `CHANGELOG.md` under a new version heading.
+2. Bump `version` in `Cargo.toml`. Before 1.0, a breaking change bumps the minor version (0.1 → 0.2).
+3. Run `cargo publish --dry-run`. It builds the packaged crate in isolation, the same way a user would get it. `cargo package --list` shows what ships: `perf/`, `monitoring/` and `.github/` are excluded in the manifest.
+4. Commit, tag `vX.Y.Z`, then `cargo publish`. Published versions are permanent; `cargo yank` only stops new projects from picking a version up.
+5. Once 0.1.0 is published, add `cargo semver-checks` to CI to catch accidental breaking changes against the last release.
+
+`rust-version` (1.89) is the highest minimum among the library's dependencies (`uuid` sets it). The CI `msrv` job checks the library on that version. Raise it when a dependency upgrade requires a newer Rust.

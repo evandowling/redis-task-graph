@@ -36,17 +36,19 @@ Related documents:
 
 ## Requirements
 
-- **Rust 2024 edition** (Rust 1.85 or newer) and a **Tokio** multi-threaded runtime.
+- **Rust 1.89 or newer** and a **Tokio** multi-threaded runtime.
 - **Redis 7.x**, or a compatible server such as Memurai on Windows. Redis Cluster is not supported (see [Limitations](#limitations)).
 
-The crate isn't published yet, so add it as a path or git dependency:
+Add the crate from crates.io, plus serde and Tokio:
 
 ```toml
 [dependencies]
-redis-task-graph = { path = "../redis-task-graph" }
+redis-task-graph = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
+
+To record metrics, enable the `otel` feature: `redis-task-graph = { version = "0.1", features = ["otel"] }`.
 
 ## Quick start
 
@@ -307,17 +309,17 @@ let worker = Worker::builder(queue.clone(), registry)
 | `min_concurrency` | 1 | Lowest limit pushback may set |
 | `adaptive_concurrency` | `true` | Pushback on or off |
 | `max_scheduling_lag` | lease ÷ 10, within 5–100 ms | Lag budget: the limit is cut when lag exceeds this |
-| `probe_interval` | 10 ms | How often the monitor thread samples lag and checks leases (field only) |
+| `probe_interval` | 10 ms | How often the monitor thread samples lag and checks leases |
 | `batch_size` | 16 | Most entries claimed per read |
 | `block` | 1 s | How long a read waits for new entries |
 | `lease` | 30 s | How long a task may go unrenewed before other workers may reclaim it |
 | `max_attempts` | 5 | Total runs before a task is dead-lettered |
 | `backoff_base`, `backoff_max` | 1 s, 300 s | Retry delay curve (set both with `.backoff(base, max)`) |
 | `promote_interval` | 500 ms | How often due retries are moved back to their streams |
-| `dead_letter_max_len` | 100,000 | Approximate cap on the dead-letter stream (field only) |
+| `dead_letter_max_len` | 100,000 | Approximate cap on the dead-letter stream |
 | `consumer_name` | `worker-<uuid>` | This worker's name in the consumer group. Must be unique among running workers. |
 
-Settings marked "field only" have no builder method. Set them on a `WorkerConfig` and pass it with `.config(..)`.
+`WorkerConfig` is `#[non_exhaustive]`, so it can't be built with a struct literal outside the crate. To build a configuration once and reuse it, start from `WorkerConfig::default()`, assign the fields you need, and pass it with `.config(..)`.
 
 **Shutdown:**
 - `shutdown().await` stops claiming new tasks and waits for the ones in flight to finish.
@@ -470,7 +472,7 @@ From the measurements in [`performance_readme.md`](performance_readme.md), taken
 
 ## Monitoring
 
-Build with `--features otel` to record OpenTelemetry metrics through the global meter provider. Your application installs the provider and exporter; the library never does.
+Build with `--features otel` to record OpenTelemetry metrics through the global meter provider. Your application installs the provider and exporter; the library never does. **Install the provider before the first `submit` or `Worker::spawn`:** the library creates its instruments on first use, and instruments created earlier stay bound to the no-op provider.
 
 The metrics cover:
 - throughput by outcome;

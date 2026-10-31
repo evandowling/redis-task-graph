@@ -87,6 +87,7 @@ impl fmt::Display for TaskId {
 
 /// The serialized form of a task as stored in Redis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TaskEnvelope {
     pub id: TaskId,
     pub processor_type: String,
@@ -106,6 +107,7 @@ pub struct TaskEnvelope {
 
 /// Position of a task within a chain, and the steps that follow it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ChainLink {
     pub chain_id: Uuid,
     /// Zero-based index of this step.
