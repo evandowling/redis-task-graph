@@ -6,13 +6,14 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
 
+use crate::heartbeat::Liveness;
 use crate::limiter::Limiter;
 use crate::scripts;
 
@@ -27,20 +28,27 @@ pub(crate) struct Monitored {
     /// Longest wait between spawning a processor and its first poll since the last sample, in
     /// microseconds: how long admitted work queues for a runtime thread.
     start_delay_us: AtomicU64,
-    /// Claimed entries whose leases the monitor renews, keyed by (stream, entry id), with the
-    /// time their next heartbeat is due.
-    leases: Mutex<HashMap<(String, String), Instant>>,
-    heartbeat_period: Duration,
+    /// Claimed entries whose leases the monitor renews, keyed by (stream, entry id).
+    leases: Mutex<HashMap<(String, String), Lease>>,
+}
+
+/// A claimed entry's lease, as tracked by the monitor.
+struct Lease {
+    /// When the next renewal is due.
+    next_due: Instant,
+    /// Time between renewals: a third of the lease.
+    period: Duration,
+    lease: Duration,
+    liveness: Arc<Liveness>,
 }
 
 impl Monitored {
-    pub(crate) fn new(limiter: Arc<Limiter>, lease: Duration) -> Arc<Self> {
+    pub(crate) fn new(limiter: Arc<Limiter>) -> Arc<Self> {
         Arc::new(Self {
             limiter,
             lag_us: AtomicU64::new(0),
             start_delay_us: AtomicU64::new(0),
             leases: Mutex::new(HashMap::new()),
-            heartbeat_period: (lease / 3).max(Duration::from_millis(10)),
         })
     }
 
@@ -58,14 +66,23 @@ impl Monitored {
         self.start_delay_us.fetch_max(delay.as_micros() as u64, Ordering::AcqRel);
     }
 
-    /// Starts renewing the lease on an entry until the returned guard is dropped.
-    pub(crate) fn hold_lease(self: &Arc<Self>, stream: &str, id: &str) -> LeaseGuard {
+    /// Starts renewing the lease on an entry until the returned guard is dropped. While the
+    /// task's processor runs and uses heartbeats, renewal also requires recent beats.
+    pub(crate) fn hold_lease(self: &Arc<Self>, stream: &str, id: &str, lease: Duration) -> LeaseGuard {
         let key = (stream.to_owned(), id.to_owned());
-        let due = Instant::now() + self.heartbeat_period;
-        self.leases.lock().unwrap().insert(key.clone(), due);
+        let liveness = Arc::new(Liveness::default());
+        let period = (lease / 3).max(Duration::from_millis(10));
+        let entry = Lease {
+            next_due: Instant::now() + period,
+            period,
+            lease,
+            liveness: liveness.clone(),
+        };
+        self.leases.lock().unwrap_or_else(PoisonError::into_inner).insert(key.clone(), entry);
         LeaseGuard {
             monitored: self.clone(),
             key,
+            liveness,
         }
     }
 }
@@ -73,11 +90,18 @@ impl Monitored {
 pub(crate) struct LeaseGuard {
     monitored: Arc<Monitored>,
     key: (String, String),
+    liveness: Arc<Liveness>,
+}
+
+impl LeaseGuard {
+    pub(crate) fn liveness(&self) -> &Arc<Liveness> {
+        &self.liveness
+    }
 }
 
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
-        self.monitored.leases.lock().unwrap().remove(&self.key);
+        self.monitored.leases.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.key);
     }
 }
 
@@ -236,18 +260,23 @@ fn renew_leases(
     conn: &mut Option<redis::Connection>,
     now: Instant,
 ) {
-    let due: Vec<(String, String)> = {
-        let mut leases = shared.leases.lock().unwrap();
-        leases
-            .iter_mut()
-            .filter(|(_, next)| **next <= now)
-            .map(|(key, next)| {
-                *next = now + shared.heartbeat_period;
-                key.clone()
-            })
-            .collect()
-    };
-    for key in due {
+    let mut due: Vec<(String, String)> = Vec::new();
+    {
+        let mut leases = shared.leases.lock().unwrap_or_else(PoisonError::into_inner);
+        for (key, lease) in leases.iter_mut().filter(|(_, l)| l.next_due <= now) {
+            lease.next_due = now + lease.period;
+            // A processor that uses heartbeats and has gone silent for a whole lease is treated
+            // as hung: stop renewing, so the lease expires even if this worker never recovers,
+            // and abort it.
+            if lease.liveness.silence().is_some_and(|s| s >= lease.lease) {
+                debug!(stream = key.0, id = key.1, "no heartbeat for a whole lease; not renewing");
+                lease.liveness.abort();
+            } else {
+                due.push(key.clone());
+            }
+        }
+    }
+    for (i, key) in due.iter().enumerate() {
         let result = connection(config, conn).and_then(|c| {
             scripts::HEARTBEAT
                 .key(&key.0)
@@ -260,19 +289,25 @@ fn renew_leases(
             Ok(1) => {}
             Ok(-1) => {
                 // Acked between the heartbeat being scheduled and sent.
-                shared.leases.lock().unwrap().remove(&key);
+                shared.leases.lock().unwrap_or_else(PoisonError::into_inner).remove(key);
             }
             Ok(_) => {
                 warn!(stream = key.0, id = key.1, "lease lost; another worker may run this task");
                 crate::telemetry::lease_lost(&key.0);
-                shared.leases.lock().unwrap().remove(&key);
+                shared.leases.lock().unwrap_or_else(PoisonError::into_inner).remove(key);
             }
             Err(e) => {
+                // Retry this and the remaining renewals on the next tick, rather than waiting out a
+                // connection timeout for each of them now.
                 warn!(stream = key.0, id = key.1, error = %e, "heartbeat failed; retrying");
                 *conn = None;
-                if let Some(next) = shared.leases.lock().unwrap().get_mut(&key) {
-                    *next = now;
+                let mut leases = shared.leases.lock().unwrap_or_else(PoisonError::into_inner);
+                for key in &due[i..] {
+                    if let Some(lease) = leases.get_mut(key) {
+                        lease.next_due = now;
+                    }
                 }
+                return;
             }
         }
     }

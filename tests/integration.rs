@@ -811,3 +811,261 @@ mod pushback {
         assert_eq!(runs.load(Ordering::SeqCst), 3, "no task ran twice");
     }
 }
+
+mod leases {
+    use super::*;
+    use redis::streams::StreamReadReply;
+    use redis_task_graph::{Error, Heartbeat};
+
+    /// Creates the consumer group for `processor_type`'s stream, as a worker would.
+    async fn create_group(t: &mut TestQueue, processor_type: &str) -> String {
+        let stream = t.queue.stream_key(processor_type);
+        let _: () = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(&stream)
+            .arg(t.queue.group_name())
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(&mut t.conn)
+            .await
+            .unwrap();
+        stream
+    }
+
+    /// Claims up to `count` new entries as `consumer` and never acks them, like a crashed worker.
+    async fn claim_as(t: &mut TestQueue, stream: &str, consumer: &str, count: usize) -> Vec<String> {
+        let reply: StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg(t.queue.group_name())
+            .arg(consumer)
+            .arg("COUNT")
+            .arg(count)
+            .arg("STREAMS")
+            .arg(stream)
+            .arg(">")
+            .query_async(&mut t.conn)
+            .await
+            .unwrap();
+        reply.keys.into_iter().flat_map(|k| k.ids).map(|e| e.id).collect()
+    }
+
+    #[tokio::test]
+    async fn heartbeating_task_with_a_short_lease_runs_once() {
+        let Some(t) = setup().await else { return };
+        let runs = Arc::new(AtomicUsize::new(0));
+        let reg = |runs: Arc<AtomicUsize>| {
+            let mut reg = Registry::new();
+            reg.register_with_heartbeat("long", move |_: Ctx, hb: Heartbeat| {
+                let runs = runs.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    for _ in 0..30 {
+                        hb.beat();
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+                    Ok(())
+                }
+            })
+            .unwrap()
+            .set_lease("long", Duration::from_millis(200))
+            .unwrap();
+            reg
+        };
+        // Two workers, so a lease that expired would be picked up by the other one.
+        let w1 = fast(Worker::builder(t.queue.clone(), reg(runs.clone()))).spawn().await.unwrap();
+        let w2 = fast(Worker::builder(t.queue.clone(), reg(runs.clone()))).spawn().await.unwrap();
+
+        t.queue.submit("long", &ctx(1)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1800)).await;
+        w1.shutdown().await;
+        w2.shutdown().await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "a beating task keeps its 200 ms lease for 1.2 s");
+    }
+
+    /// Sets a flag when dropped, to show that a future was aborted.
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn processor_that_stops_beating_is_aborted_and_retried() {
+        let Some(mut t) = setup().await else { return };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let aborted = Arc::new(AtomicBool::new(false));
+        let mut reg = Registry::new();
+        let (c, a) = (calls.clone(), aborted.clone());
+        reg.register_with_heartbeat("hangs", move |_: Ctx, hb: Heartbeat| {
+            let (c, a) = (c.clone(), a.clone());
+            async move {
+                if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // First attempt: beat once, then hang forever.
+                    let _flag = DropFlag(a);
+                    hb.beat();
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        })
+        .unwrap()
+        .set_lease("hangs", Duration::from_millis(300))
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        t.queue.submit("hangs", &ctx(1)).await.unwrap();
+        assert!(eventually(Duration::from_secs(5), || async { calls.load(Ordering::SeqCst) == 2 }).await);
+        assert!(aborted.load(Ordering::SeqCst), "the hung processor's future was dropped");
+        // Detection takes one lease plus up to a third of a lease, far below the worker's 30 s.
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        worker.shutdown().await;
+        assert_eq!(t.xlen("hangs").await, 0);
+        assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_type_lease_sets_how_soon_expired_tasks_are_reclaimed() {
+        let Some(mut t) = setup().await else { return };
+        let stream = create_group(&mut t, "orphan").await;
+        t.queue.submit("orphan", &ctx(1)).await.unwrap();
+        assert_eq!(claim_as(&mut t, &stream, "ghost", 1).await.len(), 1);
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let mut reg = Registry::new();
+        let s = seen.clone();
+        reg.register("orphan", move |_: Ctx| {
+            let s = s.clone();
+            async move {
+                s.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .unwrap()
+        .set_lease("orphan", Duration::from_millis(200))
+        .unwrap();
+        // The worker's own lease is the 30 s default; only the type's lease is short.
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        assert!(eventually(Duration::from_secs(3), || async { seen.load(Ordering::SeqCst) == 1 }).await);
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn task_that_keeps_crashing_workers_is_dead_lettered_without_running() {
+        let Some(mut t) = setup().await else { return };
+        let stream = create_group(&mut t, "poison").await;
+        let id = t.queue.submit("poison", &ctx(7)).await.unwrap();
+        let entry = claim_as(&mut t, &stream, "crashed-1", 1).await.remove(0);
+        // Two more workers took the entry over and also died: three deliveries, no outcome.
+        for consumer in ["crashed-2", "crashed-3"] {
+            let _: redis::Value = redis::cmd("XCLAIM")
+                .arg(&stream)
+                .arg(t.queue.group_name())
+                .arg(consumer)
+                .arg(0)
+                .arg(&entry)
+                .query_async(&mut t.conn)
+                .await
+                .unwrap();
+        }
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut reg = Registry::new();
+        let r = runs.clone();
+        reg.register("poison", move |_: Ctx| {
+            let r = r.clone();
+            async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .unwrap()
+        .set_lease("poison", Duration::from_millis(200))
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(3).spawn().await.unwrap();
+
+        let dead = eventually(Duration::from_secs(3), || async {
+            !t.queue.dead_letters(10).await.unwrap().is_empty()
+        })
+        .await;
+        worker.shutdown().await;
+        assert!(dead, "the task should be dead-lettered");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "a crash-looping task must not run again");
+        let letters = t.queue.dead_letters(10).await.unwrap();
+        assert_eq!(letters[0].id, id);
+        assert!(letters[0].last_error.as_deref().unwrap().contains("delivered 4 times"));
+        assert_eq!(t.xlen("poison").await, 0);
+    }
+
+    #[tokio::test]
+    async fn expired_task_behind_many_live_ones_is_reclaimed() {
+        let Some(mut t) = setup().await else { return };
+        let stream = create_group(&mut t, "busy").await;
+        // 200 tasks held by a healthy consumer, more than one XAUTOCLAIM call examines (10 x the
+        // batch size of 16), then one task held by a consumer that crashed.
+        for n in 0..200 {
+            t.queue.submit("busy", &ctx(n)).await.unwrap();
+        }
+        let healthy = claim_as(&mut t, &stream, "healthy", 200).await;
+        assert_eq!(healthy.len(), 200);
+        t.queue.submit("busy", &ctx(999)).await.unwrap();
+        assert_eq!(claim_as(&mut t, &stream, "crashed", 1).await.len(), 1);
+
+        // Keep the healthy consumer's leases fresh, as its own heartbeats would.
+        let refresher = tokio::spawn({
+            let (mut conn, stream, group) = (t.conn.clone(), stream.clone(), t.queue.group_name());
+            async move {
+                loop {
+                    let _: redis::RedisResult<redis::Value> = redis::cmd("XCLAIM")
+                        .arg(&stream)
+                        .arg(&group)
+                        .arg("healthy")
+                        .arg(0)
+                        .arg(&healthy)
+                        .arg("JUSTID")
+                        .query_async(&mut conn)
+                        .await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        });
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        let s = seen.clone();
+        reg.register("busy", move |c: Ctx| {
+            let s = s.clone();
+            async move {
+                s.lock().unwrap().push(c.n);
+                Ok(())
+            }
+        })
+        .unwrap()
+        .set_lease("busy", Duration::from_millis(300))
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+
+        let reclaimed =
+            eventually(Duration::from_secs(4), || async { seen.lock().unwrap().contains(&999) }).await;
+        refresher.abort();
+        worker.shutdown().await;
+        assert!(reclaimed, "the crashed consumer's task was never reclaimed");
+        assert_eq!(*seen.lock().unwrap(), vec![999], "live tasks must not be reclaimed");
+    }
+
+    #[tokio::test]
+    async fn leases_below_the_minimum_are_rejected() {
+        let Some(t) = setup().await else { return };
+        let mut reg = Registry::new();
+        reg.register("t", |_: Ctx| async { Ok(()) }).unwrap();
+        let short = fast(Worker::builder(t.queue.clone(), reg.clone())).lease(Duration::from_millis(10));
+        assert!(matches!(short.spawn().await, Err(Error::InvalidConfig(_))));
+
+        reg.set_lease("t", Duration::from_millis(50)).unwrap();
+        let short_type = fast(Worker::builder(t.queue.clone(), reg));
+        assert!(matches!(short_type.spawn().await, Err(Error::InvalidConfig(_))));
+    }
+}

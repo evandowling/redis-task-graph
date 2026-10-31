@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use redis::aio::ConnectionManager;
-use redis::streams::{StreamAutoClaimReply, StreamId, StreamReadOptions, StreamReadReply};
+use redis::streams::{StreamAutoClaimReply, StreamId, StreamPendingCountReply, StreamReadOptions, StreamReadReply};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
@@ -12,12 +12,17 @@ use uuid::Uuid;
 
 use crate::client::TaskQueue;
 use crate::error::{Error, Result};
+use crate::heartbeat::{Heartbeat, Liveness};
 use crate::limiter::{Limiter, Permit};
 use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
 use crate::registry::{HandlerError, Registry};
 use crate::scripts;
 use crate::task::{ChainLink, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
 use crate::telemetry::{self, ChainEvent, ClaimSource, Finished};
+
+/// Shortest lease a worker accepts. Leases are renewed every third of a lease from a thread that
+/// wakes every few milliseconds, so much shorter leases would expire between renewals.
+pub const MIN_LEASE: Duration = Duration::from_millis(100);
 
 /// Tuning knobs for a [`Worker`].
 #[derive(Debug, Clone)]
@@ -40,7 +45,9 @@ pub struct WorkerConfig {
     pub batch_size: usize,
     /// How long a read blocks waiting for new entries.
     pub block: Duration,
-    /// How long a claimed task may go without a heartbeat before other workers may reclaim it.
+    /// How long a claimed task may go without its lease being renewed before other workers may
+    /// reclaim it. Processor types can override it with [`Registry::set_lease`]. At least
+    /// [`MIN_LEASE`].
     pub lease: Duration,
     /// Total number of times a task is run before it is dead-lettered.
     pub max_attempts: u32,
@@ -203,6 +210,30 @@ impl Worker {
             .map(|t| self.queue.stream_key(t))
             .collect();
         streams.sort();
+        // Each stream's lease: its processor type's, or the worker's.
+        let stream_prefix = self.queue.keys.stream_prefix();
+        let processor_type = |s: &str| s.strip_prefix(stream_prefix.as_str()).unwrap_or(s).to_owned();
+        let per_stream: HashMap<String, StreamInfo> = streams
+            .iter()
+            .map(|s| {
+                let processor_type = processor_type(s);
+                let lease = self.registry.get(&processor_type).and_then(|p| p.lease);
+                let info = StreamInfo {
+                    metrics: telemetry::handle(&processor_type),
+                    lease: lease.unwrap_or(self.config.lease),
+                };
+                (s.clone(), info)
+            })
+            .collect();
+        let too_short = |what: &str, lease: Duration| {
+            Error::InvalidConfig(format!("{what} lease is {lease:?}; the minimum is {MIN_LEASE:?}"))
+        };
+        if self.config.lease < MIN_LEASE {
+            return Err(too_short("the worker", self.config.lease));
+        }
+        if let Some((stream, info)) = per_stream.iter().find(|(_, s)| s.lease < MIN_LEASE) {
+            return Err(too_short(stream, info.lease));
+        }
 
         let mut conn = self.queue.conn.clone();
         let group = self.queue.group_name();
@@ -219,7 +250,7 @@ impl Worker {
         } else {
             config.concurrency
         };
-        let monitored = Monitored::new(Limiter::new(initial), config.lease);
+        let monitored = Monitored::new(Limiter::new(initial));
         let monitor = Monitor::spawn(
             MonitorConfig {
                 client: self.queue.client.clone(),
@@ -236,21 +267,13 @@ impl Worker {
         );
         let stats = Arc::downgrade(&monitored);
         telemetry::register_worker(&config.consumer_name, stats.clone());
-        let stream_prefix = self.queue.keys.stream_prefix();
-        let types = streams
-            .iter()
-            .map(|s| {
-                let processor_type = s.strip_prefix(stream_prefix.as_str()).unwrap_or(s);
-                (s.clone(), telemetry::handle(processor_type))
-            })
-            .collect();
         let inner = Arc::new(Inner {
             monitored,
             in_flight: AtomicUsize::new(0),
             idle: Notify::new(),
             group,
             streams,
-            types,
+            per_stream,
             queue: self.queue,
             registry: self.registry,
             config,
@@ -314,14 +337,22 @@ impl WorkerHandle {
     }
 }
 
+/// What a worker knows about one of its streams.
+struct StreamInfo {
+    /// Metrics for the stream's processor type.
+    metrics: telemetry::TypeHandle,
+    /// Lease for the stream's tasks: its processor type's, or the worker's.
+    lease: Duration,
+}
+
 struct Inner {
     queue: TaskQueue,
     registry: Registry,
     config: WorkerConfig,
     group: String,
     streams: Vec<String>,
-    /// Metrics handle for each stream's processor type.
-    types: HashMap<String, telemetry::TypeHandle>,
+    /// Metrics and lease for each stream, resolved once at spawn.
+    per_stream: HashMap<String, StreamInfo>,
     /// Concurrency limiter, renewed leases and lag stats, shared with the monitor thread.
     monitored: Arc<Monitored>,
     in_flight: AtomicUsize,
@@ -335,7 +366,11 @@ impl Inner {
 
     /// Metrics for the processor type of one of this worker's streams.
     fn metrics(&self, stream: &str) -> &telemetry::TypeHandle {
-        &self.types[stream]
+        &self.per_stream[stream].metrics
+    }
+
+    fn lease(&self, stream: &str) -> Duration {
+        self.per_stream[stream].lease
     }
 
     fn limiter(&self) -> &Arc<Limiter> {
@@ -422,18 +457,23 @@ async fn create_group(conn: &mut ConnectionManager, stream: &str, group: &str) -
     }
 }
 
+/// Starts processing a claimed entry. `deliveries` is how many times Redis has delivered it,
+/// counting this delivery.
 fn dispatch(
     inner: &Arc<Inner>,
     stream: String,
     entry: StreamId,
     permit: Option<Permit>,
+    deliveries: u64,
+    lease: Duration,
 ) {
     let guard = InFlight::new(inner);
     let dispatched_at = std::time::Instant::now();
     // Start renewing the lease now, at claim time: the task may wait in the run queue for longer
     // than the lease when the runtime is saturated.
-    let lease = inner.monitored.hold_lease(&stream, &entry.id);
-    tokio::spawn(process(inner.clone(), stream, entry, permit, guard, dispatched_at, lease));
+    let lease = inner.monitored.hold_lease(&stream, &entry.id, lease);
+    let claim = Claim { stream, entry, deliveries };
+    tokio::spawn(process(inner.clone(), claim, permit, guard, dispatched_at, lease));
 }
 
 async fn fetch_loop(
@@ -466,8 +506,9 @@ async fn fetch_loop(
                     for entry in key.ids {
                         // COUNT applies per stream, so a multi-stream read can return more
                         // entries than permits; the excess waits for a permit inside `process`.
-                        inner.metrics(&key.key).claimed(ClaimSource::Fetch);
-                        dispatch(&inner, key.key.clone(), entry, permits.pop());
+                        let info = &inner.per_stream[&key.key];
+                        info.metrics.claimed(ClaimSource::Fetch);
+                        dispatch(&inner, key.key.clone(), entry, permits.pop(), 1, info.lease);
                     }
                 }
             }
@@ -483,36 +524,114 @@ async fn fetch_loop(
     }
 }
 
+/// Most `XAUTOCLAIM` calls per stream per reclaim pass. Each call examines at most ten times its
+/// COUNT pending entries, so one pass covers up to `MAX_RECLAIM_CALLS * 10 * batch_size` of them;
+/// the next pass continues from where this one stopped.
+const MAX_RECLAIM_CALLS: usize = 16;
+
+/// Reclaims tasks whose leases expired, scanning each stream every half of that stream's lease.
 async fn reclaim_loop(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
     let mut conn = inner.queue.conn.clone();
-    let interval = (inner.config.lease / 2).max(Duration::from_millis(100));
-    let min_idle = inner.config.lease.as_millis() as u64;
-    while !sleep_or_stop(&mut shutdown, interval).await {
-        for stream in &inner.streams {
-            let Some(mut permits) = inner.acquire_batch(inner.config.batch_size, &mut shutdown).await
-            else {
-                return;
-            };
-            let reply: redis::RedisResult<StreamAutoClaimReply> = redis::cmd("XAUTOCLAIM")
-                .arg(stream)
-                .arg(&inner.group)
-                .arg(inner.consumer())
-                .arg(min_idle)
-                .arg("0-0")
-                .arg("COUNT")
-                .arg(permits.len())
-                .query_async(&mut conn)
-                .await;
-            match reply {
-                Ok(reply) => {
-                    for entry in reply.claimed {
-                        debug!(stream, id = %entry.id, "reclaimed expired task");
-                        inner.metrics(stream).claimed(ClaimSource::Reclaim);
-                        dispatch(&inner, stream.clone(), entry, permits.pop());
-                    }
-                }
-                Err(e) => warn!(error = %e, stream, "failed to reclaim tasks"),
+    let interval = |stream: &str| (inner.lease(stream) / 2).max(Duration::from_millis(50));
+    let start = tokio::time::Instant::now();
+    // Per stream: when its next pass is due, and where the last pass stopped in the pending list.
+    let mut state: Vec<(tokio::time::Instant, String)> = inner
+        .streams
+        .iter()
+        .map(|s| (start + interval(s), "0-0".to_owned()))
+        .collect();
+    loop {
+        let next = state.iter().map(|(due, _)| *due).min().expect("a worker has at least one stream");
+        tokio::select! {
+            _ = tokio::time::sleep_until(next) => {}
+            _ = shutdown.changed() => return,
+        }
+        if stopping(&shutdown) {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        for (stream, (due, cursor)) in inner.streams.iter().zip(state.iter_mut()) {
+            if *due > now {
+                continue;
             }
+            *due = now + interval(stream);
+            if !reclaim_stream(&inner, &mut conn, stream, cursor, &mut shutdown).await {
+                return;
+            }
+        }
+    }
+}
+
+/// One pass over a stream's pending entries, resuming from `cursor`. Returns `false` if shutdown
+/// was signalled.
+async fn reclaim_stream(
+    inner: &Arc<Inner>,
+    conn: &mut ConnectionManager,
+    stream: &str,
+    cursor: &mut String,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    let info = &inner.per_stream[stream];
+    let min_idle = info.lease.as_millis() as u64;
+    for _ in 0..MAX_RECLAIM_CALLS {
+        let Some(mut permits) = inner.acquire_batch(inner.config.batch_size, shutdown).await else {
+            return false;
+        };
+        let reply: redis::RedisResult<StreamAutoClaimReply> = redis::cmd("XAUTOCLAIM")
+            .arg(stream)
+            .arg(&inner.group)
+            .arg(inner.consumer())
+            .arg(min_idle)
+            .arg(cursor.as_str())
+            .arg("COUNT")
+            .arg(permits.len())
+            .query_async(conn)
+            .await;
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(e) => {
+                warn!(error = %e, stream, "failed to reclaim tasks");
+                return true;
+            }
+        };
+        let deliveries = delivery_counts(inner, conn, stream, &reply.claimed).await;
+        for (entry, deliveries) in reply.claimed.into_iter().zip(deliveries) {
+            debug!(stream, id = %entry.id, deliveries, "reclaimed expired task");
+            info.metrics.claimed(ClaimSource::Reclaim);
+            dispatch(inner, stream.to_owned(), entry, permits.pop(), deliveries, info.lease);
+        }
+        // XAUTOCLAIM returns 0-0 once it has scanned to the end of the pending list.
+        *cursor = reply.next_stream_id;
+        if cursor == "0-0" {
+            break;
+        }
+    }
+    true
+}
+
+/// How many times Redis has delivered each claimed entry, counting this claim. If the counts
+/// can't be read, each entry counts as delivered once.
+async fn delivery_counts(
+    inner: &Inner,
+    conn: &mut ConnectionManager,
+    stream: &str,
+    claimed: &[StreamId],
+) -> Vec<u64> {
+    if claimed.is_empty() {
+        return Vec::new();
+    }
+    let mut pipe = redis::pipe();
+    for entry in claimed {
+        pipe.cmd("XPENDING").arg(stream).arg(&inner.group).arg(&entry.id).arg(&entry.id).arg(1);
+    }
+    match pipe.query_async::<Vec<StreamPendingCountReply>>(conn).await {
+        Ok(replies) => replies
+            .iter()
+            .map(|r| r.ids.first().map_or(1, |p| p.times_delivered as u64))
+            .collect(),
+        Err(e) => {
+            warn!(error = %e, stream, "failed to read delivery counts");
+            vec![1; claimed.len()]
         }
     }
 }
@@ -588,33 +707,54 @@ enum Outcome {
     Fatal(String),
 }
 
-async fn process(
-    inner: Arc<Inner>,
+/// A claimed stream entry.
+struct Claim {
     stream: String,
     entry: StreamId,
+    /// How many times Redis has delivered the entry, counting this delivery.
+    deliveries: u64,
+}
+
+async fn process(
+    inner: Arc<Inner>,
+    claim: Claim,
     permit: Option<Permit>,
     _guard: InFlight,
     dispatched_at: std::time::Instant,
-    _lease: LeaseGuard,
+    lease: LeaseGuard,
 ) {
     // How long this task sat in the runtime queue: a direct measure of scheduling lag.
     inner.monitored.record_start_delay(dispatched_at.elapsed());
-    // `_lease`, taken at claim time, keeps the lease renewed until this function returns: while
+    // `lease`, taken at claim time, keeps the lease renewed until this function returns: while
     // queued, waiting for a permit, running, and recording the outcome.
     let _permit = match permit {
         Some(p) => p,
         None => inner.limiter().acquire().await,
     };
 
+    let Claim { stream, entry, deliveries } = claim;
     let id = &entry.id;
     let metrics = inner.metrics(&stream);
     let payload: String = entry.get(PAYLOAD_FIELD).unwrap_or_default();
     let (finalized, report) = match serde_json::from_str::<TaskEnvelope>(&payload) {
-        Ok(envelope) => {
+        Ok(mut envelope) => {
+            // Earlier deliveries of this entry never recorded an outcome: their workers crashed or
+            // stalled, possibly because of this task. Count them as failed attempts, so a task
+            // that keeps crashing workers is dead-lettered instead of retried forever.
+            let abandoned = u32::try_from(deliveries.saturating_sub(1)).unwrap_or(u32::MAX);
+            envelope.attempt = envelope.attempt.saturating_add(abandoned);
             let since_submit = now_millis().saturating_sub(envelope.enqueued_at);
             let queue_time = Duration::from_millis(since_submit);
             let started = std::time::Instant::now();
-            let outcome = run(&inner, &envelope).await;
+            let outcome = if abandoned > 0 && envelope.attempt >= inner.config.max_attempts {
+                error!(stream, id, deliveries, "dead-lettering task whose deliveries never finished");
+                Outcome::Fatal(format!(
+                    "delivered {deliveries} times without an outcome being recorded; workers \
+                     crashed or stalled while running it"
+                ))
+            } else {
+                run(&inner, &envelope, &stream, lease.liveness()).await
+            };
             let run_time = started.elapsed();
             let report = classify(&outcome, &envelope, inner.config.max_attempts);
             let started = std::time::Instant::now();
@@ -771,17 +911,34 @@ async fn succeed(
     .await
 }
 
-async fn run(inner: &Inner, envelope: &TaskEnvelope) -> Outcome {
-    let Some(handler) = inner.registry.get(&envelope.processor_type).cloned() else {
+async fn run(inner: &Inner, envelope: &TaskEnvelope, stream: &str, liveness: &Arc<Liveness>) -> Outcome {
+    let Some(processor) = inner.registry.get(&envelope.processor_type) else {
         return Outcome::Fatal(format!(
             "no processor registered for type `{}`",
             envelope.processor_type
         ));
     };
-    match tokio::spawn(handler(envelope.context.clone())).await {
+    let heartbeat = Heartbeat::new(liveness.clone());
+    let task = tokio::spawn((processor.handler)(envelope.context.clone(), heartbeat));
+    let joined = if processor.heartbeat {
+        // The monitor aborts the task if it stops sending heartbeats.
+        liveness.set_abort(task.abort_handle());
+        liveness.set_running(true);
+        let joined = task.await;
+        liveness.set_running(false);
+        joined
+    } else {
+        task.await
+    };
+    match joined {
         Ok(Ok(output)) => Outcome::Succeeded(output),
         Ok(Err(HandlerError::Failed(e))) => Outcome::Failed(e),
         Ok(Err(HandlerError::Fatal(e))) => Outcome::Fatal(e),
+        Err(join) if join.is_cancelled() => {
+            let lease = inner.lease(stream);
+            warn!(task = %envelope.id, ?lease, "no heartbeat for a whole lease; processor aborted");
+            Outcome::Failed(format!("processor sent no heartbeat for {lease:?} and was aborted"))
+        }
         Err(join) => Outcome::Failed(panic_message(join)),
     }
 }

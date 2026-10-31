@@ -18,6 +18,12 @@ pub enum Error {
 
     #[error("worker has no registered processors")]
     NoProcessors,
+
+    #[error("no processor is registered for type `{0}`")]
+    UnknownProcessor(String),
+
+    #[error("invalid worker configuration: {0}")]
+    InvalidConfig(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

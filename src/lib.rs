@@ -19,6 +19,7 @@
 mod chain;
 mod client;
 mod error;
+mod heartbeat;
 mod keys;
 mod limiter;
 mod monitor;
@@ -31,9 +32,10 @@ mod worker;
 pub use chain::{ChainBuilder, ChainId, ChainStatus, DEFAULT_RESULT_TTL};
 pub use client::TaskQueue;
 pub use error::{BoxError, Error, Result};
+pub use heartbeat::Heartbeat;
 pub use registry::Registry;
 pub use task::{ChainLink, IntoTaskType, TaskEnvelope, TaskId, TaskType};
-pub use worker::{Worker, WorkerConfig, WorkerHandle, WorkerStats};
+pub use worker::{MIN_LEASE, Worker, WorkerConfig, WorkerHandle, WorkerStats};
 
 // Dependencies whose types appear in this crate's API, so users can name them at matching versions.
 pub use redis;
