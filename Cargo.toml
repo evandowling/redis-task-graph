@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 description = "A Redis-backed async task queue with typed task chains, leases, retries and adaptive concurrency"
 license = "MIT"
+repository = "https://github.com/evandowling/redis-task-graph"
 readme = "README.md"
 keywords = ["redis", "queue", "tasks", "async", "jobs"]
 categories = ["asynchronous", "concurrency"]
