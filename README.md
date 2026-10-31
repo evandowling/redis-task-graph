@@ -38,6 +38,7 @@ Related documents:
 
 - **Rust 1.89 or newer** and a **Tokio** multi-threaded runtime.
 - **Redis 7.x**, or a compatible server such as Memurai on Windows. Redis Cluster is not supported (see [Limitations](#limitations)).
+- **`maxmemory-policy noeviction`** if Redis has a memory limit. Under any evicting policy, Redis can delete whole task streams or chain state when it fills up. Workers log a warning at startup when they can read the policy and it isn't `noeviction`.
 
 Add the crate from crates.io, plus serde and Tokio:
 
@@ -343,12 +344,14 @@ let worker = Worker::builder(queue.clone(), registry)
 | `probe_interval` | 10 ms | How often the monitor thread samples lag and checks leases |
 | `batch_size` | 16 | Most entries claimed per read |
 | `block` | 1 s | How long a read waits for new entries |
-| `lease` | 30 s | How long a task may go unrenewed before other workers may reclaim it. Override it per type with `Registry::set_lease`; at least `MIN_LEASE` (100 ms). |
+| `lease` | 30 s | How long a task may go unrenewed before other workers may reclaim it. Override it per type with `Registry::set_lease`. At least `MIN_LEASE` (100 ms) and 10 × `probe_interval`. |
 | `max_attempts` | 5 | Total runs before a task is dead-lettered |
 | `backoff_base`, `backoff_max` | 1 s, 300 s | Retry delay curve (set both with `.backoff(base, max)`) |
 | `promote_interval` | 500 ms | How often due retries are moved back to their streams |
 | `dead_letter_max_len` | 100,000 | Approximate cap on the dead-letter stream |
 | `consumer_name` | `worker-<uuid>` | This worker's name in the consumer group. Must be unique among running workers. |
+
+`Worker::spawn` checks the settings with `WorkerConfig::validate` and returns `Error::InvalidConfig` for unsafe ones: zero counts, a zero `block` (Redis reads it as "block forever"), a `promote_interval` under 10 ms, `min_concurrency` above `concurrency`, `backoff_base` above `backoff_max`, a lease that's too short, or any duration over 30 days.
 
 `WorkerConfig` is `#[non_exhaustive]`, so it can't be built with a struct literal outside the crate. To build a configuration once and reuse it, start from `WorkerConfig::default()`, assign the fields you need, and pass it with `.config(..)`.
 

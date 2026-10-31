@@ -131,8 +131,8 @@ pub struct TaskEnvelope {
 ```
 
 `Worker::spawn` (`src/worker.rs`) does the following:
-1. Rejects an empty registry.
-2. Builds the sorted list of stream keys from the registry's processor types, and creates the consumer group on each.
+1. Rejects an empty registry, then validates the settings: `WorkerConfig::validate`, plus `check_lease` for every stream's lease. Both return `Error::InvalidConfig`.
+2. Builds the sorted list of stream keys from the registry's processor types. Reads `maxmemory` and `maxmemory-policy` with `CONFIG GET` and logs a warning if Redis may evict keys (best-effort; managed services often disable `CONFIG`). Creates the consumer group on each stream.
 3. Opens a **second** connection for blocking reads. Its response timeout is `block + 5 s`. A blocking `XREADGROUP` on the shared multiplexed connection would stall every other command behind it.
 4. Creates the `Limiter`. With pushback, the initial limit is the runtime's thread count, clamped to `[min_concurrency, concurrency]`. Without it, the limit is `concurrency`.
 5. Wraps the limiter in `Monitored`, spawns the `Monitor` thread, and registers the worker's gauges with telemetry.
@@ -230,7 +230,7 @@ Scripts are `LazyLock<redis::Script>` and are invoked with `EVALSHA`. The redis 
 
 **Two kinds of heartbeat.** *Renewals* are the monitor's `HEARTBEAT` script calls, which reset an entry's PEL idle time in Redis. *Processor beats* are `Heartbeat::beat()` calls from user code (`src/heartbeat.rs`), which only store a timestamp in memory. The monitor decides from the beats whether to keep renewing.
 
-**Lease length.** Each stream has a lease: its processor type's `Registry::set_lease`, or the worker's `lease`. `Worker::spawn` resolves the per-stream leases once into `Inner::leases`, and rejects any below `MIN_LEASE` (100 ms) with `Error::InvalidConfig`. The reclaim loop uses the stream's lease as its `XAUTOCLAIM` min-idle time. Every lease-table entry carries its own lease and renewal period.
+**Lease length.** Each stream has a lease: its processor type's `Registry::set_lease`, or the worker's `lease`. `Worker::spawn` resolves the per-stream leases once into `Inner::per_stream`, and rejects any shorter than `MIN_LEASE` (100 ms) or 10 probe intervals, or longer than 30 days, with `Error::InvalidConfig`. Ten probe intervals leave room for three renewal attempts per lease, since renewals are due every third of a lease and checked once per probe. The reclaim loop uses the stream's lease as its `XAUTOCLAIM` min-idle time. Every lease-table entry carries its own lease and renewal period.
 
 **Lease table.**
 - **Structure:** `Mutex<HashMap<(stream, entry_id), Lease>>`. A `Lease` holds `next_due`, `period = max(lease/3, 10 ms)`, `lease`, and an `Arc<Liveness>`.
@@ -452,7 +452,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count, with `--features otel`, is 50: 25 integration tests, 21 unit tests, 1 telemetry test and 3 doctests.
+The current count, with `--features otel`, is 53: 25 integration tests, 24 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 

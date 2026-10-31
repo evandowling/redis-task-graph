@@ -84,6 +84,13 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Longest duration any setting accepts, so deadline arithmetic and conversions to Redis
+/// milliseconds can't overflow.
+const MAX_SETTING: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Shortest `promote_interval`; shorter ones make the retry loop hammer Redis.
+const MIN_PROMOTE_INTERVAL: Duration = Duration::from_millis(10);
+
 impl WorkerConfig {
     /// The effective scheduling-lag budget.
     pub fn lag_budget(&self) -> Duration {
@@ -91,6 +98,87 @@ impl WorkerConfig {
             (self.lease / 10).clamp(Duration::from_millis(5), Duration::from_millis(100))
         })
     }
+
+    /// Checks that the settings are safe to run with. [`Worker::spawn`] calls this, and also
+    /// checks the leases set per processor type.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] naming the first bad setting, for example a zero `block`
+    /// (Redis's "block forever"), a lease below [`MIN_LEASE`] or not at least ten probe
+    /// intervals long, or `min_concurrency` above `concurrency`.
+    pub fn validate(&self) -> Result<()> {
+        let invalid = |msg: String| Err(Error::InvalidConfig(msg));
+        if self.concurrency == 0 || self.min_concurrency == 0 {
+            return invalid("concurrency and min_concurrency must be at least 1".into());
+        }
+        if self.min_concurrency > self.concurrency {
+            return invalid(format!(
+                "min_concurrency ({}) is above concurrency ({})",
+                self.min_concurrency, self.concurrency
+            ));
+        }
+        if self.batch_size == 0 {
+            return invalid("batch_size must be at least 1".into());
+        }
+        if self.max_attempts == 0 {
+            return invalid("max_attempts must be at least 1".into());
+        }
+        if self.consumer_name.is_empty() {
+            return invalid("consumer_name is empty".into());
+        }
+        let durations = [
+            ("probe_interval", self.probe_interval),
+            ("block", self.block),
+            ("lease", self.lease),
+            ("backoff_base", self.backoff_base),
+            ("backoff_max", self.backoff_max),
+            ("promote_interval", self.promote_interval),
+        ];
+        let lag = self.max_scheduling_lag.map(|d| ("max_scheduling_lag", d));
+        if let Some((name, d)) = durations.into_iter().chain(lag).find(|(_, d)| *d > MAX_SETTING) {
+            return invalid(format!("{name} is {d:?}; the maximum is {MAX_SETTING:?}"));
+        }
+        if self.probe_interval.is_zero() {
+            return invalid("probe_interval must be above zero".into());
+        }
+        if self.block.is_zero() {
+            return invalid("block must be above zero; Redis treats 0 as \"block forever\"".into());
+        }
+        if self.max_scheduling_lag.is_some_and(|d| d.is_zero()) {
+            return invalid("max_scheduling_lag must be above zero".into());
+        }
+        if self.promote_interval < MIN_PROMOTE_INTERVAL {
+            return invalid(format!(
+                "promote_interval is {:?}; the minimum is {MIN_PROMOTE_INTERVAL:?}",
+                self.promote_interval
+            ));
+        }
+        if self.backoff_base > self.backoff_max {
+            return invalid(format!(
+                "backoff_base ({:?}) is above backoff_max ({:?})",
+                self.backoff_base, self.backoff_max
+            ));
+        }
+        check_lease("the worker", self.lease, self.probe_interval)
+    }
+}
+
+/// A lease must outlast several renewal rounds: at least [`MIN_LEASE`], and at least ten probe
+/// intervals since leases are renewed every third of a lease, checked once per probe.
+fn check_lease(what: &str, lease: Duration, probe_interval: Duration) -> Result<()> {
+    let minimum = MIN_LEASE.max(probe_interval.saturating_mul(10));
+    if lease < minimum {
+        return Err(Error::InvalidConfig(format!(
+            "{what} lease is {lease:?}; the minimum is {minimum:?}"
+        )));
+    }
+    if lease > MAX_SETTING {
+        return Err(Error::InvalidConfig(format!(
+            "{what} lease is {lease:?}; the maximum is {MAX_SETTING:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// A snapshot of a worker's load, from [`WorkerHandle::stats`].
@@ -225,17 +313,13 @@ impl Worker {
                 (s.clone(), info)
             })
             .collect();
-        let too_short = |what: &str, lease: Duration| {
-            Error::InvalidConfig(format!("{what} lease is {lease:?}; the minimum is {MIN_LEASE:?}"))
-        };
-        if self.config.lease < MIN_LEASE {
-            return Err(too_short("the worker", self.config.lease));
-        }
-        if let Some((stream, info)) = per_stream.iter().find(|(_, s)| s.lease < MIN_LEASE) {
-            return Err(too_short(stream, info.lease));
+        self.config.validate()?;
+        for (stream, info) in &per_stream {
+            check_lease(stream, info.lease, self.config.probe_interval)?;
         }
 
         let mut conn = self.queue.conn.clone();
+        warn_if_evicting(&mut conn).await;
         let group = self.queue.group_name();
         for stream in &streams {
             create_group(&mut conn, stream, &group).await?;
@@ -455,6 +539,39 @@ async fn create_group(conn: &mut ConnectionManager, stream: &str, group: &str) -
         Err(e) if e.code() != Some("BUSYGROUP") => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+/// Warns if Redis may evict keys under memory pressure, which would silently delete queued
+/// tasks and chain state. Best-effort: managed services often disable `CONFIG`.
+async fn warn_if_evicting(conn: &mut ConnectionManager) {
+    let reply: redis::RedisResult<HashMap<String, String>> = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("maxmemory")
+        .arg("maxmemory-policy")
+        .query_async(conn)
+        .await;
+    match reply {
+        Ok(config) => {
+            let get = |k: &str| config.get(k).map_or("", String::as_str);
+            let (maxmemory, policy) = (get("maxmemory"), get("maxmemory-policy"));
+            if may_evict(maxmemory, policy) {
+                warn!(
+                    maxmemory,
+                    policy,
+                    "Redis may evict keys when full, which loses queued tasks; \
+                     set maxmemory-policy to noeviction"
+                );
+            }
+        }
+        Err(e) => debug!(error = %e, "could not read the Redis eviction policy"),
+    }
+}
+
+/// Whether a Redis with these settings may evict keys: it has a memory limit and a policy other
+/// than `noeviction`. `volatile-*` policies are unsafe too, since chain state has a TTL.
+fn may_evict(maxmemory: &str, policy: &str) -> bool {
+    let limited = !maxmemory.is_empty() && maxmemory != "0";
+    limited && !policy.is_empty() && policy != "noeviction"
 }
 
 /// Starts processing a claimed entry. `deliveries` is how many times Redis has delivered it,
@@ -1066,5 +1183,44 @@ mod tests {
             assert!((500..=1000).contains(&(d20.as_millis() as u64)));
         }
         assert_eq!(backoff(1, Duration::ZERO, max), Duration::ZERO);
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        WorkerConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn dangerous_settings_are_rejected() {
+        type Break = fn(&mut WorkerConfig);
+        let cases: [(&str, Break); 10] = [
+            ("concurrency", |c| c.concurrency = 0),
+            ("min_concurrency", |c| c.min_concurrency = 17),
+            ("batch_size", |c| c.batch_size = 0),
+            ("max_attempts", |c| c.max_attempts = 0),
+            ("block", |c| c.block = Duration::ZERO),
+            ("probe_interval", |c| c.probe_interval = Duration::ZERO),
+            ("promote_interval", |c| c.promote_interval = Duration::ZERO),
+            ("backoff_base", |c| c.backoff_base = Duration::from_secs(600)),
+            ("lease", |c| c.probe_interval = Duration::from_secs(5)),
+            ("lease", |c| c.lease = Duration::MAX),
+        ];
+        for (setting, break_it) in cases {
+            let mut config = WorkerConfig::default();
+            break_it(&mut config);
+            match config.validate() {
+                Err(Error::InvalidConfig(msg)) => assert!(msg.contains(setting), "{setting}: {msg}"),
+                other => panic!("{setting}: expected InvalidConfig, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn eviction_is_possible_only_with_a_memory_limit_and_an_evicting_policy() {
+        assert!(!may_evict("0", "allkeys-lru"), "no memory limit");
+        assert!(!may_evict("1073741824", "noeviction"));
+        assert!(may_evict("1073741824", "allkeys-lru"));
+        assert!(may_evict("1073741824", "volatile-ttl"), "chain state has a TTL");
+        assert!(!may_evict("", ""), "unknown settings don't warn");
     }
 }
