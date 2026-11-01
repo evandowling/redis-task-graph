@@ -34,11 +34,38 @@ pub struct Job {
     pub len: u32,
     #[serde(default)]
     pub pad: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numbers: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bytes: Vec<u8>,
+}
+
+/// Padding that makes a job's context bigger, sized in bytes of raw data. JSON encodes text
+/// 1:1, but writes each `u32` as up to 10 digits and each byte as up to 3, plus a comma.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pad {
+    /// ASCII text, JSON's best case.
+    Text(usize),
+    /// `u32`s spread over their whole range, as in number-heavy structs.
+    Numbers(usize),
+    /// A `Vec<u8>` of every byte value, as for an embedded blob.
+    Bytes(usize),
+}
+
+impl Pad {
+    pub const NONE: Pad = Pad::Text(0);
 }
 
 impl Job {
-    pub fn new(id: u64, len: u32, pad_bytes: usize) -> Self {
-        Self { id, t0_us: now_us(), hop: 0, len, pad: "x".repeat(pad_bytes) }
+    pub fn new(id: u64, len: u32, pad: Pad) -> Self {
+        let mut job = Self { id, t0_us: now_us(), hop: 0, len, pad: String::new(), numbers: Vec::new(), bytes: Vec::new() };
+        match pad {
+            Pad::Text(n) => job.pad = "x".repeat(n),
+            // Multiplying by an odd constant spreads consecutive values over the whole range.
+            Pad::Numbers(n) => job.numbers = (0..n as u32 / 4).map(|i| i.wrapping_mul(2_654_435_761)).collect(),
+            Pad::Bytes(n) => job.bytes = (0..n).map(|i| i as u8).collect(),
+        }
+        job
     }
 }
 
@@ -413,7 +440,7 @@ pub async fn enqueue(queue: &TaskQueue, shape: Shape, job: Job) {
 }
 
 /// Enqueues `jobs` jobs with up to 64 submissions in flight.
-pub async fn preload(queue: &TaskQueue, shape: Shape, jobs: usize, pad: usize) {
+pub async fn preload(queue: &TaskQueue, shape: Shape, jobs: usize, pad: Pad) {
     futures::stream::iter(0..jobs as u64)
         .map(|id| enqueue(queue, shape, Job::new(id, shape.len(), pad)))
         .buffer_unordered(64)
@@ -436,7 +463,7 @@ pub async fn wait_done(rec: &Recorder, jobs: usize, timeout: Duration) -> bool {
 
 /// Preloads `jobs` jobs, then starts a cluster and measures how fast it drains them.
 /// Returns processor executions per second.
-pub fn drain(spec: ClusterSpec, shape: Shape, jobs: usize, pad: usize) -> DrainResult {
+pub fn drain(spec: ClusterSpec, shape: Shape, jobs: usize, pad: Pad) -> DrainResult {
     let ns = fresh_ns();
     let rec = Recorder::new();
     let rt = driver();
@@ -461,7 +488,7 @@ pub fn drain(spec: ClusterSpec, shape: Shape, jobs: usize, pad: usize) -> DrainR
 }
 
 /// Runs [`drain`] `reps` times and returns the run with the median rate.
-pub fn drain_median(spec: ClusterSpec, shape: Shape, jobs: usize, pad: usize, reps: usize) -> DrainResult {
+pub fn drain_median(spec: ClusterSpec, shape: Shape, jobs: usize, pad: Pad, reps: usize) -> DrainResult {
     let mut runs: Vec<DrainResult> = (0..reps.max(1)).map(|_| drain(spec, shape, jobs, pad)).collect();
     runs.sort_by(|a, b| a.rate.partial_cmp(&b.rate).unwrap());
     runs.swap_remove(runs.len() / 2)

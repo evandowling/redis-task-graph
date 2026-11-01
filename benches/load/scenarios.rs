@@ -34,6 +34,8 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("cpu_bound", cpu_bound),
     ("lease_starvation", lease_starvation),
     ("payload_size", payload_size),
+    ("payload_kind", payload_kind),
+    ("payload_kind_chain", payload_kind_chain),
     ("worker_scaling", worker_scaling),
     ("pushback_limit", pushback_limit),
     ("pushback_lag", pushback_lag),
@@ -60,7 +62,7 @@ pub fn consume_throughput(o: &Opts) -> Figure {
         for c in POW2(0, 8) {
             let jobs = o.jobs((c * workers * 1500) as f64, 6000, 30_000);
             let spec = ClusterSpec { workers, threads: 4, ..ClusterSpec::new(c, Work::Noop) };
-            let r = drain_median(spec, Shape::Task, jobs, 0, 3);
+            let r = drain_median(spec, Shape::Task, jobs, Pad::NONE, 3);
             log(format!("{name} c={c}: {:.0} tasks/s ({jobs} jobs)", r.rate));
             fig.push(&name, c as f64, r.rate);
         }
@@ -92,7 +94,7 @@ pub fn submit_throughput(o: &Opts) -> Figure {
                         let q = q.clone();
                         tokio::spawn(async move {
                             for i in 0..per {
-                                enqueue(&q, shape, Job::new((w * per + i) as u64, shape.len(), 0)).await;
+                                enqueue(&q, shape, Job::new((w * per + i) as u64, shape.len(), Pad::NONE)).await;
                             }
                         })
                     })
@@ -126,7 +128,7 @@ pub fn latency_under_load(o: &Opts) -> Figure {
     // RTG_LATENCY_CAPACITY pins the capacity instead of measuring it, so two versions compared
     // A/B are offered the same absolute loads. Near capacity, latency depends steeply on load.
     let pinned = std::env::var("RTG_LATENCY_CAPACITY").ok().and_then(|v| v.parse::<f64>().ok());
-    let capacity = pinned.unwrap_or_else(|| drain(spec, Shape::Task, o.jobs(30_000.0, 3000, 30_000), 0).rate);
+    let capacity = pinned.unwrap_or_else(|| drain(spec, Shape::Task, o.jobs(30_000.0, 3000, 30_000), Pad::NONE).rate);
     log(format!("drain capacity: {capacity:.0} tasks/s{}", if pinned.is_some() { " (pinned)" } else { "" }));
     fig.subtitle = format!(
         "One worker, concurrency 64; drain capacity measured at {:.0} tasks/s",
@@ -152,7 +154,7 @@ pub fn latency_under_load(o: &Opts) -> Figure {
                 while sent < due {
                     let (q, id) = (q.clone(), sent);
                     tokio::spawn(async move {
-                        q.submit(STEP, &Job::new(id, 1, 0)).await.unwrap();
+                        q.submit(STEP, &Job::new(id, 1, Pad::NONE)).await.unwrap();
                     });
                     sent += 1;
                 }
@@ -206,13 +208,13 @@ fn latency_sweep(fig: &mut Figure, o: &Opts, work: Work, shapes: &[(&str, ShapeF
                         // `len` independent tasks submitted together; latency is the slowest one.
                         let t0 = now_us();
                         for i in 0..len {
-                            let mut job = Job::new((rep as u64) << 16 | i as u64, 1, 0);
+                            let mut job = Job::new((rep as u64) << 16 | i as u64, 1, Pad::NONE);
                             job.t0_us = t0;
                             enqueue(&q, Shape::Task, job).await;
                         }
                         done += len as usize;
                     } else {
-                        enqueue(&q, shape, Job::new(rep as u64, len, 0)).await;
+                        enqueue(&q, shape, Job::new(rep as u64, len, Pad::NONE)).await;
                         done += 1;
                     }
                     wait_done(&rec, done, Duration::from_secs(30)).await;
@@ -299,7 +301,7 @@ pub fn chain_throughput(o: &Opts) -> Figure {
         for len in POW2(0, 5) {
             let shape = make(len as u32);
             let jobs = if shape == Shape::Task { total_steps } else { total_steps / len };
-            let r = drain_median(spec, shape, jobs, 0, 3);
+            let r = drain_median(spec, shape, jobs, Pad::NONE, 3);
             log(format!("{name} len={len}: {:.0} steps/s", r.rate));
             fig.push(name, len as f64, r.rate);
         }
@@ -331,7 +333,7 @@ pub fn chain_throughput_io(o: &Opts) -> Figure {
             } else {
                 (Shape::Task, total_steps)
             };
-            let r = drain(spec, shape, jobs, 0);
+            let r = drain(spec, shape, jobs, Pad::NONE);
             log(format!("{name} len={len}: {:.0} steps/s", r.rate));
             fig.push(name, len as f64, r.rate);
         }
@@ -371,7 +373,7 @@ pub fn io_bound(o: &Opts) -> Figure {
             let ideal = parallel(c, threads) as f64 / wait;
             let jobs = o.jobs(ideal * 2.5, 40, 30_000);
             let spec = ClusterSpec { threads, ..ClusterSpec::new(c, work) };
-            let r = drain(spec, Shape::Task, jobs, 0);
+            let r = drain(spec, Shape::Task, jobs, Pad::NONE);
             log(format!("{name} c={c}: {:.0} tasks/s (ideal {ideal:.0})", r.rate));
             fig.push(name, c as f64, r.rate);
         }
@@ -405,7 +407,7 @@ pub fn cpu_bound(o: &Opts) -> Figure {
             let ideal = c.min(hw) as f64 / target.as_secs_f64();
             let jobs = o.jobs(ideal * 2.5, 40, 8000);
             let spec = ClusterSpec { threads: hw, ..ClusterSpec::new(c, work) };
-            let r = drain(spec, Shape::Task, jobs, 0);
+            let r = drain(spec, Shape::Task, jobs, Pad::NONE);
             log(format!("{name} c={c}: {:.0} tasks/s (ideal {ideal:.0})", r.rate));
             fig.push(name, c as f64, r.rate);
         }
@@ -442,7 +444,7 @@ pub fn lease_starvation(o: &Opts) -> Figure {
                 lease: Duration::from_millis(300),
                 ..ClusterSpec::new(c, work)
             };
-            let r = drain(spec, Shape::Task, jobs, 0);
+            let r = drain(spec, Shape::Task, jobs, Pad::NONE);
             log(format!(
                 "{name} c={c}: {} executions for {} tasks ({:.0}% duplicates)",
                 r.executions,
@@ -458,30 +460,59 @@ pub fn lease_starvation(o: &Opts) -> Figure {
 
 /// Throughput as the context grows; chains carry the payload through every hop.
 pub fn payload_size(o: &Opts) -> Figure {
-    let mut fig = Figure::new(
-        "payload_size",
-        "Throughput vs. context size",
-        "Context size",
-        "Steps completed / s",
-    );
+    let mut fig = payload_figure("payload_size", "Throughput vs. context size");
     fig.subtitle = "No-op steps, concurrency 16; a chain passes the full payload to every step through Redis".into();
+    payload_scan(o, &mut fig, [("task", Shape::Task, Pad::Text), ("4-step chain", Shape::Chain(4), Pad::Text)]);
+    fig
+}
+
+/// Plain-task throughput as the context grows, for text, numbers and bytes.
+pub fn payload_kind(o: &Opts) -> Figure {
+    let mut fig = payload_figure("payload_kind", "Task throughput vs. context size and kind");
+    fig.subtitle = format!("No-op tasks, concurrency 16. {KIND_NOTE}");
+    let t = Shape::Task;
+    payload_scan(o, &mut fig, [("text", t, Pad::Text), ("u32 array", t, Pad::Numbers), ("byte array", t, Pad::Bytes)]);
+    fig
+}
+
+/// Chain-step throughput as the context grows, for text, numbers and bytes.
+pub fn payload_kind_chain(o: &Opts) -> Figure {
+    let mut fig = payload_figure("payload_kind_chain", "Chain step throughput vs. context size and kind");
+    fig.subtitle = format!("No-op steps of 4-step chains, concurrency 16. {KIND_NOTE}");
+    let c = Shape::Chain(4);
+    payload_scan(o, &mut fig, [("text", c, Pad::Text), ("u32 array", c, Pad::Numbers), ("byte array", c, Pad::Bytes)]);
+    fig
+}
+
+const KIND_NOTE: &str = "Size is raw data: JSON is about 2.7x larger for u32 arrays and 3.6x for byte arrays";
+
+fn payload_figure(id: &str, title: &str) -> Figure {
+    let mut fig = Figure::new(id, title, "Context size", "Steps completed / s");
     fig.x_scale = Scale::Log2;
     fig.y_scale = Scale::Log10;
     fig.x_format = Format::Bytes;
+    fig
+}
+
+/// A payload series: its name, job shape, and padding for a given raw size.
+type PayloadSeries<'a> = (&'a str, Shape, fn(usize) -> Pad);
+
+/// Drains no-op jobs of each series' shape and padding at each context size.
+fn payload_scan<const N: usize>(o: &Opts, fig: &mut Figure, series: [PayloadSeries; N]) {
     let spec = ClusterSpec::new(16, Work::Noop);
-    for (name, shape) in [("task", Shape::Task), ("4-step chain", Shape::Chain(4))] {
+    for (name, shape, pad) in series {
         for size in [64usize, 1 << 10, 8 << 10, 64 << 10, 256 << 10, 512 << 10] {
-            // At least 256 steps (16 waves at concurrency 16) and at most ~128 MB in Redis.
-            let steps = o.jobs((128usize << 20) as f64 / size as f64, 256, 20_000).max(256);
+            // At least 256 steps (16 waves at concurrency 16) and at most ~128 MB of JSON in Redis.
+            let encoded = serde_json::to_vec(&Job::new(0, shape.len(), pad(size))).unwrap().len();
+            let steps = o.jobs((128usize << 20) as f64 / encoded as f64, 256, 20_000).max(256);
             let jobs = steps / shape.len() as usize;
-            let r = drain_median(spec, shape, jobs, size, 3);
+            let r = drain_median(spec, shape, jobs, pad(size), 3);
             let mb_s = r.rate * size as f64 / (1 << 20) as f64;
-            log(format!("{name} {size} B: {:.0} steps/s, {mb_s:.1} MB/s", r.rate));
+            log(format!("{name} {size} B ({encoded} B as JSON): {:.0} steps/s, {mb_s:.1} MB/s", r.rate));
             fig.push(name, size as f64, r.rate);
             fig.note(format!("{name} {size}B MB/s"), format!("{mb_s:.1}"));
         }
     }
-    fig
 }
 
 /// Adding workers: Redis-bound no-op tasks vs. I/O-bound tasks.
@@ -502,7 +533,7 @@ pub fn worker_scaling(o: &Opts) -> Figure {
             let ideal = if matches!(work, Work::Noop) { 30_000.0 } else { (w * 32) as f64 / wait };
             let jobs = o.jobs(ideal * 2.5, 200, 30_000);
             let spec = ClusterSpec { workers: w, threads: 2, ..ClusterSpec::new(32, work) };
-            let r = drain_median(spec, Shape::Task, jobs, 0, 3);
+            let r = drain_median(spec, Shape::Task, jobs, Pad::NONE, 3);
             log(format!("{name} workers={w}: {:.0} tasks/s", r.rate));
             fig.push(name, w as f64, r.rate);
         }
@@ -531,7 +562,7 @@ fn pushback_timeline(o: &Opts, adaptive: bool) -> (Vec<(f64, WorkerStats)>, f64)
     let rt = driver();
     rt.block_on(async {
         let q = connect(&ns).await;
-        preload(&q, Shape::Task, jobs, 0).await;
+        preload(&q, Shape::Task, jobs, Pad::NONE).await;
     });
     let cluster = Cluster::start(spec, &ns, &rec);
     let samples = rt.block_on(async {
