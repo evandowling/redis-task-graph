@@ -123,8 +123,11 @@ pub fn latency_under_load(o: &Opts) -> Figure {
     fig.higher_is_better = false;
     fig.y_scale = Scale::Log10;
     let spec = ClusterSpec::new(64, Work::Noop);
-    let capacity = drain(spec, Shape::Task, o.jobs(30_000.0, 3000, 30_000), 0).rate;
-    log(format!("drain capacity: {capacity:.0} tasks/s"));
+    // RTG_LATENCY_CAPACITY pins the capacity instead of measuring it, so two versions compared
+    // A/B are offered the same absolute loads. Near capacity, latency depends steeply on load.
+    let pinned = std::env::var("RTG_LATENCY_CAPACITY").ok().and_then(|v| v.parse::<f64>().ok());
+    let capacity = pinned.unwrap_or_else(|| drain(spec, Shape::Task, o.jobs(30_000.0, 3000, 30_000), 0).rate);
+    log(format!("drain capacity: {capacity:.0} tasks/s{}", if pinned.is_some() { " (pinned)" } else { "" }));
     fig.subtitle = format!(
         "One worker, concurrency 64; drain capacity measured at {:.0} tasks/s",
         capacity

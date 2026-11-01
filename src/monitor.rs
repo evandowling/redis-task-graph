@@ -5,7 +5,7 @@
 //! waits for a runtime thread. Even if processors block every runtime thread, leases stay alive.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -20,6 +20,23 @@ use crate::scripts;
 /// Multiplier applied to the limit when lag exceeds its budget.
 const DECREASE_FACTOR: f64 = 0.7;
 
+/// Number of independently locked parts of the lease table, so tasks starting and finishing on
+/// different threads rarely contend, and a renewal scan never locks every task at once.
+const SHARDS: usize = 16;
+
+/// Most leases renewed by one script call. One call per batch keeps renewal to one round trip
+/// per tick at typical loads, while bounding how long a single script blocks Redis.
+const RENEW_BATCH: usize = 128;
+
+/// A lease-table key: the stream's index in [`Monitored`]'s stream list, and the entry id.
+type LeaseKey = (u32, Box<str>);
+
+type LeaseShard = Mutex<HashMap<LeaseKey, Lease>>;
+
+fn lock(shard: &LeaseShard) -> std::sync::MutexGuard<'_, HashMap<LeaseKey, Lease>> {
+    shard.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// State shared between a worker's tasks and its monitor thread.
 pub(crate) struct Monitored {
     pub(crate) limiter: Arc<Limiter>,
@@ -28,8 +45,11 @@ pub(crate) struct Monitored {
     /// Longest wait between spawning a processor and its first poll since the last sample, in
     /// microseconds: how long admitted work queues for a runtime thread.
     start_delay_us: AtomicU64,
-    /// Claimed entries whose leases the monitor renews, keyed by (stream, entry id).
-    leases: Mutex<HashMap<(String, String), Lease>>,
+    /// The worker's stream keys, indexed by the stream part of a [`LeaseKey`].
+    streams: Vec<String>,
+    /// Claimed entries whose leases the monitor renews, spread across shards round-robin.
+    leases: [LeaseShard; SHARDS],
+    next_shard: AtomicUsize,
 }
 
 /// A claimed entry's lease, as tracked by the monitor.
@@ -43,12 +63,15 @@ struct Lease {
 }
 
 impl Monitored {
-    pub(crate) fn new(limiter: Arc<Limiter>) -> Arc<Self> {
+    /// `streams` are the worker's stream keys; leases name their stream by its index here.
+    pub(crate) fn new(limiter: Arc<Limiter>, streams: Vec<String>) -> Arc<Self> {
         Arc::new(Self {
             limiter,
             lag_us: AtomicU64::new(0),
             start_delay_us: AtomicU64::new(0),
-            leases: Mutex::new(HashMap::new()),
+            streams,
+            leases: std::array::from_fn(|_| Mutex::default()),
+            next_shard: AtomicUsize::new(0),
         })
     }
 
@@ -68,8 +91,9 @@ impl Monitored {
 
     /// Starts renewing the lease on an entry until the returned guard is dropped. While the
     /// task's processor runs and uses heartbeats, renewal also requires recent beats.
-    pub(crate) fn hold_lease(self: &Arc<Self>, stream: &str, id: &str, lease: Duration) -> LeaseGuard {
-        let key = (stream.to_owned(), id.to_owned());
+    pub(crate) fn hold_lease(self: &Arc<Self>, stream: u32, id: &str, lease: Duration) -> LeaseGuard {
+        let key: LeaseKey = (stream, id.into());
+        let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % SHARDS;
         let liveness = Arc::new(Liveness::default());
         let period = (lease / 3).max(Duration::from_millis(10));
         let entry = Lease {
@@ -78,9 +102,10 @@ impl Monitored {
             lease,
             liveness: liveness.clone(),
         };
-        self.leases.lock().unwrap_or_else(PoisonError::into_inner).insert(key.clone(), entry);
+        lock(&self.leases[shard]).insert(key.clone(), entry);
         LeaseGuard {
             monitored: self.clone(),
+            shard,
             key,
             liveness,
         }
@@ -89,7 +114,8 @@ impl Monitored {
 
 pub(crate) struct LeaseGuard {
     monitored: Arc<Monitored>,
-    key: (String, String),
+    shard: usize,
+    key: LeaseKey,
     liveness: Arc<Liveness>,
 }
 
@@ -101,7 +127,7 @@ impl LeaseGuard {
 
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
-        self.monitored.leases.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.key);
+        lock(&self.monitored.leases[self.shard]).remove(&self.key);
     }
 }
 
@@ -260,50 +286,55 @@ fn renew_leases(
     conn: &mut Option<redis::Connection>,
     now: Instant,
 ) {
-    let mut due: Vec<(String, String)> = Vec::new();
-    {
-        let mut leases = shared.leases.lock().unwrap_or_else(PoisonError::into_inner);
+    // Collect due leases one shard at a time, so tasks on other shards can start and finish.
+    let mut due: Vec<(usize, LeaseKey)> = Vec::new();
+    for (shard, leases) in shared.leases.iter().enumerate() {
+        let mut leases = lock(leases);
         for (key, lease) in leases.iter_mut().filter(|(_, l)| l.next_due <= now) {
             lease.next_due = now + lease.period;
             // A processor that uses heartbeats and has gone silent for a whole lease is treated
             // as hung: stop renewing, so the lease expires even if this worker never recovers,
             // and abort it.
             if lease.liveness.silence().is_some_and(|s| s >= lease.lease) {
-                debug!(stream = key.0, id = key.1, "no heartbeat for a whole lease; not renewing");
+                let stream = &shared.streams[key.0 as usize];
+                debug!(stream, id = &*key.1, "no heartbeat for a whole lease; not renewing");
                 lease.liveness.abort();
             } else {
-                due.push(key.clone());
+                due.push((shard, key.clone()));
             }
         }
     }
-    for (i, key) in due.iter().enumerate() {
+    for (n, batch) in due.chunks(RENEW_BATCH).enumerate() {
         let result = connection(config, conn).and_then(|c| {
-            scripts::HEARTBEAT
-                .key(&key.0)
-                .arg(&config.group)
-                .arg(&key.1)
-                .arg(&config.consumer)
-                .invoke::<i64>(c)
+            let mut invocation = scripts::HEARTBEAT.prepare_invoke();
+            invocation.arg(&config.group).arg(&config.consumer);
+            for (_, (stream, id)) in batch {
+                invocation.key(&shared.streams[*stream as usize]).arg(&**id);
+            }
+            invocation.invoke::<Vec<i64>>(c)
         });
         match result {
-            Ok(1) => {}
-            Ok(-1) => {
-                // Acked between the heartbeat being scheduled and sent.
-                shared.leases.lock().unwrap_or_else(PoisonError::into_inner).remove(key);
-            }
-            Ok(_) => {
-                warn!(stream = key.0, id = key.1, "lease lost; another worker may run this task");
-                crate::telemetry::lease_lost(&key.0);
-                shared.leases.lock().unwrap_or_else(PoisonError::into_inner).remove(key);
+            Ok(statuses) => {
+                for ((shard, key), status) in batch.iter().zip(statuses) {
+                    if status == 1 {
+                        continue;
+                    }
+                    // -1: acked between the renewal being scheduled and sent.
+                    if status != -1 {
+                        let stream = &shared.streams[key.0 as usize];
+                        warn!(stream, id = &*key.1, "lease lost; another worker may run this task");
+                        crate::telemetry::lease_lost(stream);
+                    }
+                    lock(&shared.leases[*shard]).remove(key);
+                }
             }
             Err(e) => {
                 // Retry this and the remaining renewals on the next tick, rather than waiting out a
-                // connection timeout for each of them now.
-                warn!(stream = key.0, id = key.1, error = %e, "heartbeat failed; retrying");
+                // connection timeout for each batch now.
+                warn!(error = %e, leases = due.len() - n * RENEW_BATCH, "lease renewal failed; retrying");
                 *conn = None;
-                let mut leases = shared.leases.lock().unwrap_or_else(PoisonError::into_inner);
-                for key in &due[i..] {
-                    if let Some(lease) = leases.get_mut(key) {
+                for (shard, key) in &due[n * RENEW_BATCH..] {
+                    if let Some(lease) = lock(&shared.leases[*shard]).get_mut(key) {
                         lease.next_due = now;
                     }
                 }

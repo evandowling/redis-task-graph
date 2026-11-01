@@ -1057,6 +1057,42 @@ mod leases {
     }
 
     #[tokio::test]
+    async fn more_long_tasks_than_one_renewal_batch_keep_their_leases() {
+        let Some(mut t) = setup().await else { return };
+        let runs = Arc::new(AtomicUsize::new(0));
+        let reg = |runs: Arc<AtomicUsize>| {
+            let mut reg = Registry::new();
+            reg.register("slow", move |_: Ctx| {
+                let runs = runs.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                    Ok(())
+                }
+            })
+            .unwrap()
+            .set_lease("slow", Duration::from_millis(300))
+            .unwrap();
+            reg
+        };
+        // 300 tasks held at once by one worker need three renewal batches every 100 ms. The
+        // second worker would reclaim any lease that lapsed.
+        let queue = t.queue.clone();
+        let worker = |runs| fast(Worker::builder(queue.clone(), reg(runs))).concurrency(300).adaptive_concurrency(false);
+        let w1 = worker(runs.clone()).spawn().await.unwrap();
+        for n in 0..300 {
+            t.queue.submit("slow", &ctx(n)).await.unwrap();
+        }
+        assert!(eventually(Duration::from_secs(2), || async { runs.load(Ordering::SeqCst) == 300 }).await);
+        let w2 = worker(runs.clone()).spawn().await.unwrap();
+        // Shutdown waits for in-flight tasks, giving w2 a second to reclaim any lapsed lease.
+        w1.shutdown().await;
+        w2.shutdown().await;
+        assert_eq!(t.xlen("slow").await, 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 300, "no lease lapsed, so no task ran twice");
+    }
+
+    #[tokio::test]
     async fn leases_below_the_minimum_are_rejected() {
         let Some(t) = setup().await else { return };
         let mut reg = Registry::new();

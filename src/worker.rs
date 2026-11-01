@@ -303,10 +303,12 @@ impl Worker {
         let processor_type = |s: &str| s.strip_prefix(stream_prefix.as_str()).unwrap_or(s).to_owned();
         let per_stream: HashMap<String, StreamInfo> = streams
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(index, s)| {
                 let processor_type = processor_type(s);
                 let lease = self.registry.get(&processor_type).and_then(|p| p.lease);
                 let info = StreamInfo {
+                    index: u32::try_from(index).expect("fewer than 2^32 processor types"),
                     metrics: telemetry::handle(&processor_type),
                     lease: lease.unwrap_or(self.config.lease),
                 };
@@ -334,7 +336,7 @@ impl Worker {
         } else {
             config.concurrency
         };
-        let monitored = Monitored::new(Limiter::new(initial));
+        let monitored = Monitored::new(Limiter::new(initial), streams.clone());
         let monitor = Monitor::spawn(
             MonitorConfig {
                 client: self.queue.client.clone(),
@@ -423,6 +425,8 @@ impl WorkerHandle {
 
 /// What a worker knows about one of its streams.
 struct StreamInfo {
+    /// The stream's position in the worker's sorted stream list, which names it in the lease table.
+    index: u32,
     /// Metrics for the stream's processor type.
     metrics: telemetry::TypeHandle,
     /// Lease for the stream's tasks: its processor type's, or the worker's.
@@ -582,13 +586,13 @@ fn dispatch(
     entry: StreamId,
     permit: Option<Permit>,
     deliveries: u64,
-    lease: Duration,
+    info: &StreamInfo,
 ) {
     let guard = InFlight::new(inner);
     let dispatched_at = std::time::Instant::now();
     // Start renewing the lease now, at claim time: the task may wait in the run queue for longer
     // than the lease when the runtime is saturated.
-    let lease = inner.monitored.hold_lease(&stream, &entry.id, lease);
+    let lease = inner.monitored.hold_lease(info.index, &entry.id, info.lease);
     let claim = Claim { stream, entry, deliveries };
     tokio::spawn(process(inner.clone(), claim, permit, guard, dispatched_at, lease));
 }
@@ -625,7 +629,7 @@ async fn fetch_loop(
                         // entries than permits; the excess waits for a permit inside `process`.
                         let info = &inner.per_stream[&key.key];
                         info.metrics.claimed(ClaimSource::Fetch);
-                        dispatch(&inner, key.key.clone(), entry, permits.pop(), 1, info.lease);
+                        dispatch(&inner, key.key.clone(), entry, permits.pop(), 1, info);
                     }
                 }
             }
@@ -715,7 +719,7 @@ async fn reclaim_stream(
         for (entry, deliveries) in reply.claimed.into_iter().zip(deliveries) {
             debug!(stream, id = %entry.id, deliveries, "reclaimed expired task");
             info.metrics.claimed(ClaimSource::Reclaim);
-            dispatch(inner, stream.to_owned(), entry, permits.pop(), deliveries, info.lease);
+            dispatch(inner, stream.to_owned(), entry, permits.pop(), deliveries, info);
         }
         // XAUTOCLAIM returns 0-0 once it has scanned to the end of the pending list.
         *cursor = reply.next_stream_id;

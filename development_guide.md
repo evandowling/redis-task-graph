@@ -233,21 +233,21 @@ Scripts are `LazyLock<redis::Script>` and are invoked with `EVALSHA`. The redis 
 **Lease length.** Each stream has a lease: its processor type's `Registry::set_lease`, or the worker's `lease`. `Worker::spawn` resolves the per-stream leases once into `Inner::per_stream`, and rejects any shorter than `MIN_LEASE` (100 ms) or 10 probe intervals, or longer than 30 days, with `Error::InvalidConfig`. Ten probe intervals leave room for three renewal attempts per lease, since renewals are due every third of a lease and checked once per probe. The reclaim loop uses the stream's lease as its `XAUTOCLAIM` min-idle time. Every lease-table entry carries its own lease and renewal period.
 
 **Lease table.**
-- **Structure:** `Mutex<HashMap<(stream, entry_id), Lease>>`. A `Lease` holds `next_due`, `period = max(lease/3, 10 ms)`, `lease`, and an `Arc<Liveness>`.
+- **Structure:** 16 shards (`SHARDS`), each a `Mutex<HashMap<(stream index, entry id), Lease>>`. The stream index is the stream's position in the worker's sorted stream list (`StreamInfo::index`), which `Monitored` keeps for building renewals, so a key costs one allocation (the `Box<str>` id). `hold_lease` assigns shards round-robin with an atomic counter, and the `LeaseGuard` remembers its shard. A `Lease` holds `next_due`, `period = max(lease/3, 10 ms)`, `lease`, and an `Arc<Liveness>`.
 - **Liveness:** shared by the entry, the worker's `process`, and the processor's `Heartbeat`. It holds:
   - a `running` flag, set only while the processor runs;
   - `last_beat_us`, where 0 means the processor has never beaten;
   - the processor task's `AbortHandle`, set when it starts.
 - **Insertion:** `hold_lease` inserts the entry at claim time and returns a `LeaseGuard`, which removes it on drop and exposes the `Liveness`.
-- **Scan:** each tick, `renew_leases` takes the due entries under the lock and bumps their `next_due`. For each one:
+- **Scan:** each tick, `renew_leases` locks one shard at a time, takes its due entries and bumps their `next_due`. Tasks on the other shards can start and finish meanwhile. For each one:
   - **Hung:** if `silence() >= lease`, meaning the processor is running, has beaten before, and has been silent for a whole lease, the entry is *not* renewed, and the monitor aborts the processor through its `AbortHandle`.
   - **Otherwise:** the key is queued for renewal.
 
-  The lock is then released and one `HEARTBEAT` is sent per queued key.
-- **Result 1:** the lease was renewed, so nothing to do.
-- **Result -1:** the entry was acked between scheduling and sending. The lease is removed quietly.
-- **Result 0:** someone else owns the entry. The worker logs a warning, increments `rtg.leases.lost`, and removes the lease.
-- **Error:** the monitor drops the connection, which is reopened on the next use. It marks this lease and all remaining due leases due again, and ends the round, so an unreachable Redis costs one connection timeout per tick rather than one per lease.
+  The queued keys are then renewed in batches of up to `RENEW_BATCH` (128): one `HEARTBEAT` script call per batch, with each entry's stream in `KEYS` and its id in `ARGV`, returning one status per entry.
+- **Status 1:** the lease was renewed, so nothing to do.
+- **Status -1:** the entry was acked between scheduling and sending. The lease is removed quietly.
+- **Status 0:** someone else owns the entry. The worker logs a warning, increments `rtg.leases.lost`, and removes the lease.
+- **Error:** the monitor drops the connection, which is reopened on the next use. It marks the failed batch and all later ones due again, and ends the round, so an unreachable Redis costs one connection timeout per tick rather than one per batch.
 
 **Aborting hung processors.** `run` spawns the processor, stores its `AbortHandle` in the `Liveness`, and awaits it. When the monitor finds a task stalled:
 1. it aborts the processor from the monitor thread, which works even when the worker's own tasks are starved;
@@ -263,10 +263,9 @@ The finalize normally runs before the Redis lease expires: the last renewal was 
 Processors that never beat are renewed unconditionally, which is the pre-heartbeat behavior. `abort()` takes effect at the processor's next `.await`. A processor waiting on `spawn_blocking` is cancelled at once, but the blocking closure runs to completion and its result is dropped. A processor that blocks inside its async body is only cancelled once it yields; until then, the expired lease lets another worker take the task over.
 
 **Cost.**
-- **Short tasks:** a task shorter than `lease/3` never sends a renewal. Its lease costs one `Arc<Liveness>` allocation, one mutex-guarded insert and one remove, and setting the abort handle.
-- **Long tasks:** each costs one script round trip per `lease/3`.
-- **Throughput bound:** renewals go out one at a time on a single connection, so one worker can sustain about `(lease/3) / RTT` long-running tasks. That is about 300k at a 30 s lease and 30 µs RTT, but only 10k at a 1 s lease. Short per-type leases make pipelining renewals more relevant (section 18).
-
+- **Short tasks:** a task shorter than `lease/3` never sends a renewal. Its lease costs two allocations (the `Arc<Liveness>` and the key's id), an atomic increment to pick a shard, and one insert and one remove under that shard's lock.
+- **Long tasks:** each is renewed once per `lease/3`, batched with the other due leases: one script call per 128 due leases, so a tick with 300 due leases costs three round trips. The script runs `XPENDING` and `XCLAIM` per entry, so a full batch holds Redis's thread for a few hundred microseconds; `RENEW_BATCH` bounds that.
+- **Measured:** sharding and batching cost nothing measurable on the per-task path: no-op throughput -0.5% median (A/A noise 6.9%), and latency at pinned loads +1.2% median, over interleaved rounds against the single-mutex version.
 **Timing.**
 - **Expiry:** a lease expires once its entry's PEL idle time exceeds the stream's lease.
 - **Tolerated stall:** renewals run every `lease/3`, so the monitor tolerates a stall reaching Redis of at least `2/3 × lease`.
@@ -402,7 +401,7 @@ The full results are in [`performance_readme.md`](performance_readme.md). This s
 | Chain step | 1 script: `XPENDING`, `XACK`, `XDEL`, `XADD`, `HSET` |
 | Chain final step | 1 script: `XPENDING`, `XACK`, `XDEL`, `HSET`, `EXPIRE` |
 | Failure | 1 script: `XPENDING`, `XACK`, `XDEL`, then `ZADD` or `XADD` (plus `HSET`/`EXPIRE` for a dead chain step) |
-| Heartbeat | 1 script per lease/3, only for tasks running longer than that |
+| Heartbeat | 1 script per 128 due leases per tick; each task is due every lease/3, only if it runs longer than that |
 | Background | `XAUTOCLAIM` per stream per lease/2; `PROMOTE` per 500 ms; (otel) 1 pipeline per 5 s |
 
 ### Where the limits are
@@ -426,12 +425,12 @@ The full results are in [`performance_readme.md`](performance_readme.md). This s
 These paths run for every task. Changes to them need an A/B measurement (section 16).
 - `fetch_loop`, `dispatch` and `process` in `worker.rs`, including the per-task allocations (`String` clones for the stream and entry id) and the extra `tokio::spawn` in `run`.
 - `Limiter::acquire`/`try_acquire` and `Permit::drop`.
-- `Monitored::hold_lease` and the `LeaseGuard` drop. Each takes the single lease-table mutex. Sharding it would help at very high rates.
+- `Monitored::hold_lease` and the `LeaseGuard` drop. Each locks one of the 16 lease-table shards.
 - `TypeHandle::{claimed, finished, chain_step, times}` and `Sampler::keep`.
 - The finalize scripts. Every extra Redis command inside them lowers the Redis-bound ceiling directly.
 
 Off the hot path:
-- The monitor tick runs every 10 ms and is O(leases) because of the scan.
+- The monitor tick runs every 10 ms and is O(leases) because of the scan. In-flight tasks are bounded by `concurrency`, so the scan stays small; a due-time heap would avoid it but, with lazy deletion, would hold a stale entry for every task finished within the last `lease/3`.
 - The reclaim, promote and sample loops.
 
 ## 16. Testing and benchmarking
@@ -452,7 +451,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count, with `--features otel`, is 53: 25 integration tests, 24 unit tests, 1 telemetry test and 3 doctests.
+The current count, with `--features otel`, is 54: 26 integration tests, 24 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 
@@ -510,6 +509,7 @@ git worktree remove ../rtg-baseline
 - **Report:** it writes `perf/comparison.md` and overlay graphs.
 - **Threshold:** a change is flagged only if it exceeds twice the baseline's own run-to-run spread, and at least 10%.
 - **Control:** include `submit_throughput` as a control when your change doesn't touch submission. If the control moves, the environment drifted.
+- **Pin latency loads:** `latency_under_load` offers fractions of a capacity it measures in each run, so a side that measures higher capacity is driven harder, and at 95% of capacity that alone can swing latency several-fold. For A/B runs, set `RTG_LATENCY_CAPACITY=<tasks/s>` so both sides get the same absolute loads. Without it, a lease-table change once showed a false 2–3× p50 regression at 95% load; pinned, it measured +1.2% median.
 
 ## 17. Contributor rules of thumb
 
@@ -528,8 +528,6 @@ git worktree remove ../rtg-baseline
 - **Fan-out and fan-in.** Chains are linear. A DAG layer would extend `ChainLink`, or replace it with a graph id plus a join counter in the status hash, decremented atomically by a script.
 - **`dead_letters()` and raw entries.** Undecodable entries are stored as `{raw, last_error}`, and one such entry makes `dead_letters()` return an error. It should skip them or return them in a separate variant.
 - **Consumer cleanup.** Consumers are never removed from the group (`XGROUP DELCONSUMER`). Random default names make the list grow across restarts.
-- **Lease-table contention.** A single `Mutex<HashMap>` with two `String` keys per task. Sharding it, or keying by an interned stream index plus `Arc<str>`, would cut allocations and contention at very high task rates.
-- **Pipelined heartbeats.** Heartbeats are sequential on one sync connection, which bounds long-running tasks per worker at roughly `(lease/3) / RTT`.
 - **Abort on lease loss.** When a renewal finds another consumer owns the entry, the original processor keeps running until it finishes, and its outcome is then rejected. Signalling the task's `Liveness` would let the worker abort it right away, reducing duplicate side effects.
 - **Redis Cluster.** Needs hash-tagged keys and a `PROMOTE` that receives its keys rather than deriving them.
 - **Push-based chain completion.** `wait_for_chain` polls; keyspace notifications or a per-chain stream would remove that.

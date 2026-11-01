@@ -22,6 +22,11 @@ include breaking changes.
 - **Eviction-policy warning:** workers log a warning at startup if Redis has a memory limit and a `maxmemory-policy` other than `noeviction`, since eviction silently deletes queued tasks.
 - **`Debug` for `Registry`.**
 
+### Changed
+
+- **Lease renewal is batched:** the monitor renews up to 128 due leases per script call instead of one call per lease, so workers holding many long-running tasks with short leases need far fewer round trips.
+- **Sharded lease table:** the table of held leases is split into 16 independently locked shards, and each key takes one allocation instead of two. Tasks starting and finishing contend less, and a renewal scan never locks every task at once.
+
 ### Fixed
 
 - **Expired tasks could go unreclaimed.** The reclaim loop always restarted its `XAUTOCLAIM` scan at

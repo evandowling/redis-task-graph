@@ -92,17 +92,28 @@ return 1
     )
 });
 
-/// KEYS: stream. ARGV: group, id, consumer. Resets the entry's idle time if still owned.
-/// Returns 1 if the lease was extended, 0 if another consumer now owns the entry, and -1 if
-/// the entry is no longer pending (it was already acked).
+/// KEYS: the stream of each entry. ARGV: group, consumer, then the entry ids, in KEYS order.
+/// Resets each entry's idle time if this consumer still owns it. Returns one status per entry:
+/// 1 if the lease was extended, 0 if another consumer now owns the entry, and -1 if the entry
+/// is no longer pending (it was already acked).
 pub(crate) static HEARTBEAT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
-local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
-if #pending == 0 then return -1 end
-if pending[1][2] ~= ARGV[3] then return 0 end
-redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[3], 0, ARGV[2], 'JUSTID')
-return 1
+local group, consumer = ARGV[1], ARGV[2]
+local statuses = {}
+for i, stream in ipairs(KEYS) do
+  local id = ARGV[i + 2]
+  local pending = redis.call('XPENDING', stream, group, id, id, 1)
+  if #pending == 0 then
+    statuses[i] = -1
+  elseif pending[1][2] ~= consumer then
+    statuses[i] = 0
+  else
+    redis.call('XCLAIM', stream, group, consumer, 0, id, 'JUSTID')
+    statuses[i] = 1
+  end
+end
+return statuses
 ",
     )
 });
