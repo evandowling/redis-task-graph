@@ -324,7 +324,7 @@ impl Worker {
                 let lease = self.registry.get(&processor_type).and_then(|p| p.lease);
                 let info = StreamInfo {
                     index: u32::try_from(index).expect("fewer than 2^32 streams"),
-                    metrics: telemetry::handle(&processor_type),
+                    metrics: telemetry::handle(self.queue.namespace(), &processor_type),
                     lease: lease.unwrap_or(self.config.lease),
                     delayed: keys.delayed(&processor_type),
                     keys,

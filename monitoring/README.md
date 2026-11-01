@@ -71,20 +71,20 @@ Instead:
 
 | Metric | Kind | Attributes | Meaning |
 |---|---|---|---|
-| `rtg.tasks.submitted` | counter | `processor_type` | Tasks enqueued by producers |
-| `rtg.chains.submitted` | counter | `processor_type` (first step) | Chains enqueued |
-| `rtg.tasks.claimed` | counter | `processor_type`, `source` | Claimed from the stream (`fetch`) or taken over from an expired lease (`reclaim`) |
-| `rtg.tasks.finished` | counter | `processor_type`, `outcome` | Executions that ended as `success`, `retry`, `dead` or `lease_lost` |
-| `rtg.chain.steps` | counter | `processor_type`, `event` | Chain steps `advanced`, chains `completed` or `failed` |
-| `rtg.task.queue_time` | histogram (s), sampled | `processor_type` | Submission to processor start (includes retry backoff) |
-| `rtg.task.run_time` | histogram (s), sampled | `processor_type` | Processor execution time |
-| `rtg.task.finalize_time` | histogram (s), sampled | `processor_type` | Time to record the outcome in Redis |
+| `rtg.tasks.submitted` | counter | `namespace`, `processor_type` | Tasks enqueued by producers |
+| `rtg.chains.submitted` | counter | `namespace`, `processor_type` (first step) | Chains enqueued |
+| `rtg.tasks.claimed` | counter | `namespace`, `processor_type`, `source` | Claimed from the stream (`fetch`) or taken over from an expired lease (`reclaim`) |
+| `rtg.tasks.finished` | counter | `namespace`, `processor_type`, `outcome` | Executions that ended as `success`, `retry`, `dead` or `lease_lost` |
+| `rtg.chain.steps` | counter | `namespace`, `processor_type`, `event` | Chain steps `advanced`, chains `completed` or `failed` |
+| `rtg.task.queue_time` | histogram (s), sampled | `namespace`, `processor_type` | Submission to processor start (includes retry backoff) |
+| `rtg.task.run_time` | histogram (s), sampled | `namespace`, `processor_type` | Processor execution time |
+| `rtg.task.finalize_time` | histogram (s), sampled | `namespace`, `processor_type` | Time to record the outcome in Redis |
 | `rtg.leases.lost` | counter | `stream` | Leases taken over by another worker while still held |
 | `rtg.worker.concurrency_limit` | gauge | `worker` | Current pushback limit |
 | `rtg.worker.in_flight` | gauge | `worker` | Tasks holding a concurrency permit |
 | `rtg.worker.scheduling_lag` | gauge (s) | `worker` | How long ready work waits for a runtime thread |
 | `rtg.queue.depth` / `rtg.queue.pending` | gauge | `stream` | Entries in the stream / claimed but unacknowledged (sampled every 5 s) |
-| `rtg.queue.delayed` | gauge | `namespace` | Tasks waiting for a retry |
+| `rtg.queue.delayed` | gauge | `set` | Tasks waiting for a retry, per retry set (one per processor type) |
 
 ## Dashboard
 

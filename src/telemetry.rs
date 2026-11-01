@@ -11,14 +11,14 @@
 //!
 //! | Metric | Kind | Attributes |
 //! |---|---|---|
-//! | `rtg.tasks.submitted` | counter | `processor_type` |
-//! | `rtg.chains.submitted` | counter | `processor_type` (first step) |
-//! | `rtg.tasks.claimed` | counter | `processor_type`, `source` (`fetch` / `reclaim`) |
-//! | `rtg.tasks.finished` | counter | `processor_type`, `outcome` (`success` / `retry` / `dead` / `lease_lost`) |
-//! | `rtg.chain.steps` | counter | `processor_type`, `event` (`advanced` / `completed` / `failed`) |
-//! | `rtg.task.queue_time` | histogram (s), sampled | `processor_type` |
-//! | `rtg.task.run_time` | histogram (s), sampled | `processor_type` |
-//! | `rtg.task.finalize_time` | histogram (s), sampled | `processor_type` |
+//! | `rtg.tasks.submitted` | counter | `namespace`, `processor_type` |
+//! | `rtg.chains.submitted` | counter | `namespace`, `processor_type` (first step) |
+//! | `rtg.tasks.claimed` | counter | `namespace`, `processor_type`, `source` (`fetch` / `reclaim`) |
+//! | `rtg.tasks.finished` | counter | `namespace`, `processor_type`, `outcome` (`success` / `retry` / `dead` / `lease_lost`) |
+//! | `rtg.chain.steps` | counter | `namespace`, `processor_type`, `event` (`advanced` / `completed` / `failed`) |
+//! | `rtg.task.queue_time` | histogram (s), sampled | `namespace`, `processor_type` |
+//! | `rtg.task.run_time` | histogram (s), sampled | `namespace`, `processor_type` |
+//! | `rtg.task.finalize_time` | histogram (s), sampled | `namespace`, `processor_type` |
 //! | `rtg.leases.lost` | counter | `stream` |
 //! | `rtg.worker.concurrency_limit`, `rtg.worker.in_flight` | gauge | `worker` |
 //! | `rtg.worker.scheduling_lag` | gauge (s) | `worker` |
@@ -126,9 +126,10 @@ mod imp {
         }
     }
 
-    /// Counters and the duration sampler for one processor type.
+    /// Counters and the duration sampler for one processor type in one namespace.
     pub(crate) struct TypeMetrics {
-        attrs: [KeyValue; 1],
+        /// `namespace` and `processor_type`.
+        attrs: [KeyValue; 2],
         submitted: AtomicU64,
         chains_submitted: AtomicU64,
         claimed: [AtomicU64; 2],
@@ -141,17 +142,23 @@ mod imp {
     #[derive(Clone)]
     pub(crate) struct TypeHandle(Arc<TypeMetrics>);
 
-    static TYPES: LazyLock<RwLock<HashMap<String, Arc<TypeMetrics>>>> = LazyLock::new(Default::default);
+    /// Metrics by namespace, then processor type. Nested so lookups need no allocation.
+    type TypeTable = HashMap<String, HashMap<String, Arc<TypeMetrics>>>;
+    static TYPES: LazyLock<RwLock<TypeTable>> = LazyLock::new(Default::default);
 
-    pub(crate) fn handle(processor_type: &str) -> TypeHandle {
+    pub(crate) fn handle(namespace: &str, processor_type: &str) -> TypeHandle {
         LazyLock::force(&INSTRUMENTS);
-        if let Some(m) = TYPES.read().unwrap().get(processor_type) {
+        if let Some(m) = TYPES.read().unwrap().get(namespace).and_then(|types| types.get(processor_type)) {
             return TypeHandle(m.clone());
         }
-        let mut types = TYPES.write().unwrap();
+        let mut namespaces = TYPES.write().unwrap();
+        let types = namespaces.entry(namespace.to_owned()).or_default();
         let m = types.entry(processor_type.to_owned()).or_insert_with(|| {
             Arc::new(TypeMetrics {
-                attrs: [KeyValue::new("processor_type", processor_type.to_owned())],
+                attrs: [
+                    KeyValue::new("namespace", namespace.to_owned()),
+                    KeyValue::new("processor_type", processor_type.to_owned()),
+                ],
                 submitted: AtomicU64::new(0),
                 chains_submitted: AtomicU64::new(0),
                 claimed: Default::default(),
@@ -187,12 +194,12 @@ mod imp {
         }
     }
 
-    pub(crate) fn task_submitted(processor_type: &str) {
-        handle(processor_type).0.submitted.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn task_submitted(namespace: &str, processor_type: &str) {
+        handle(namespace, processor_type).0.submitted.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn chain_submitted(first_type: &str) {
-        handle(first_type).0.chains_submitted.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn chain_submitted(namespace: &str, first_type: &str) {
+        handle(namespace, first_type).0.chains_submitted.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn lease_lost(stream: &str) {
@@ -232,7 +239,7 @@ mod imp {
             .u64_observable_counter(name)
             .with_description(description)
             .with_callback(move |observer| {
-                for m in TYPES.read().unwrap().values() {
+                for m in TYPES.read().unwrap().values().flat_map(HashMap::values) {
                     observer.observe(read(m), &m.attrs);
                 }
             })
@@ -252,9 +259,9 @@ mod imp {
             .u64_observable_counter(name)
             .with_description(description)
             .with_callback(move |observer| {
-                for m in TYPES.read().unwrap().values() {
+                for m in TYPES.read().unwrap().values().flat_map(HashMap::values) {
                     for (i, (_, value)) in values.iter().enumerate() {
-                        let attrs = [m.attrs[0].clone(), KeyValue::new(label, *value)];
+                        let attrs = [m.attrs[0].clone(), m.attrs[1].clone(), KeyValue::new(label, *value)];
                         observer.observe(read(m)[i].load(Ordering::Relaxed), &attrs);
                     }
                 }
@@ -283,10 +290,11 @@ mod imp {
             .u64_observable_gauge(name)
             .with_description(description)
             .with_callback(move |observer| {
-                for (stream, sample) in QUEUES.lock().unwrap().iter() {
-                    if sample.at.elapsed() < STALE_AFTER {
-                        observer.observe(read(sample), &[KeyValue::new("stream", stream.clone())]);
-                    }
+                // A sample goes stale once its worker stops; forget it.
+                let mut queues = QUEUES.lock().unwrap();
+                queues.retain(|_, sample| sample.at.elapsed() < STALE_AFTER);
+                for (stream, sample) in queues.iter() {
+                    observer.observe(read(sample), &[KeyValue::new("stream", stream.clone())]);
                 }
             })
             .build()
@@ -336,10 +344,10 @@ mod imp {
                     .u64_observable_gauge("rtg.queue.delayed")
                     .with_description("Tasks waiting for a retry")
                     .with_callback(|observer| {
-                        for (set, (n, at)) in DELAYED.lock().unwrap().iter() {
-                            if at.elapsed() < STALE_AFTER {
-                                observer.observe(*n, &[KeyValue::new("set", set.clone())]);
-                            }
+                        let mut delayed = DELAYED.lock().unwrap();
+                        delayed.retain(|_, (_, at)| at.elapsed() < STALE_AFTER);
+                        for (set, (n, _)) in delayed.iter() {
+                            observer.observe(*n, &[KeyValue::new("set", set.clone())]);
                         }
                     })
                     .build(),
@@ -394,12 +402,16 @@ mod imp {
         }
 
         #[test]
-        fn handles_for_the_same_type_share_counters() {
-            let a = handle("telemetry-test-type");
-            let b = handle("telemetry-test-type");
+        fn handles_share_counters_per_namespace_and_type() {
+            let a = handle("telemetry-test-ns", "telemetry-test-type");
+            let b = handle("telemetry-test-ns", "telemetry-test-type");
+            let other = handle("telemetry-test-other-ns", "telemetry-test-type");
             a.finished(Finished::Success);
             b.finished(Finished::Success);
+            other.finished(Finished::Success);
             assert_eq!(a.0.finished[Finished::Success as usize].load(Ordering::Relaxed), 2);
+            assert_eq!(other.0.finished[Finished::Success as usize].load(Ordering::Relaxed), 1);
+            assert_eq!(other.0.attrs[0], KeyValue::new("namespace", "telemetry-test-other-ns"));
         }
     }
 }
@@ -416,7 +428,7 @@ mod imp {
     #[derive(Clone)]
     pub(crate) struct TypeHandle;
 
-    pub(crate) fn handle(processor_type: &str) -> TypeHandle {
+    pub(crate) fn handle(namespace: &str, processor_type: &str) -> TypeHandle {
         TypeHandle
     }
 
@@ -427,8 +439,8 @@ mod imp {
         pub(crate) fn times(&self, queue: Duration, run: Duration, finalize: Duration) {}
     }
 
-    pub(crate) fn task_submitted(processor_type: &str) {}
-    pub(crate) fn chain_submitted(first_type: &str) {}
+    pub(crate) fn task_submitted(namespace: &str, processor_type: &str) {}
+    pub(crate) fn chain_submitted(namespace: &str, first_type: &str) {}
     pub(crate) fn lease_lost(stream: &str) {}
     pub(crate) fn register_worker(worker: &str, monitored: Weak<Monitored>) {}
 }
