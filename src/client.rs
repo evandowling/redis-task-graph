@@ -89,10 +89,21 @@ impl std::fmt::Debug for TaskQueue {
 
 impl TaskQueue {
     /// Connects to Redis at `url`; all keys are prefixed with `namespace`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Redis`] if `url` is invalid or Redis can't be reached, and
+    /// [`Error::InvalidNamespace`] if `namespace` is empty or contains `{` or `}`.
     pub async fn connect(url: &str, namespace: impl Into<String>) -> Result<Self> {
         Self::from_client(redis::Client::open(url)?, namespace).await
     }
 
+    /// Like [`TaskQueue::connect`], with a client you have configured yourself.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Redis`] if Redis can't be reached, and [`Error::InvalidNamespace`] if
+    /// `namespace` is empty or contains `{` or `}`.
     pub async fn from_client(client: redis::Client, namespace: impl Into<String>) -> Result<Self> {
         let namespace = namespace.into();
         if !keys::valid_namespace(&namespace) {
@@ -106,6 +117,7 @@ impl TaskQueue {
         })
     }
 
+    /// The namespace that prefixes this queue's keys.
     pub fn namespace(&self) -> &str {
         self.keys.ns()
     }
@@ -122,6 +134,10 @@ impl TaskQueue {
 
     /// Enqueues a task to be handled by the processor registered for `task`, which is either a
     /// [`TaskType`](crate::TaskType) or a plain string. The processor's output is discarded.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`] if `context` can't be serialized, or [`Error::Redis`] if Redis can't be reached or the command fails.
     pub async fn submit<In: Serialize, Out>(
         &self,
         task: impl IntoTaskType<In, Out>,
@@ -185,6 +201,11 @@ impl TaskQueue {
     }
 
     /// Returns a chain's status, or `None` if it is unknown or its result has expired.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Redis`] if Redis can't be reached or the command fails. [`Error::Serialization`] if the chain completed with
+    /// an output that isn't an `Out`.
     pub async fn chain_status<Out: DeserializeOwned>(
         &self,
         chain: &ChainId<Out>,
@@ -200,6 +221,10 @@ impl TaskQueue {
 
     /// Polls a chain's status until it finishes or `timeout` elapses, returning the last status.
     /// Polls start 10 ms apart and back off to 500 ms, so a long wait costs Redis little.
+    ///
+    /// # Errors
+    ///
+    /// As for [`TaskQueue::chain_status`].
     pub async fn wait_for_chain<Out: DeserializeOwned>(
         &self,
         chain: &ChainId<Out>,
@@ -221,6 +246,10 @@ impl TaskQueue {
 
     /// Returns up to `count` dead letters, oldest first. Entries that can't be decoded as tasks
     /// are returned as [`DeadLetter::Undecodable`] rather than failing the whole call.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Redis`] if Redis can't be reached or the command fails.
     pub async fn dead_letters(&self, count: usize) -> Result<Vec<DeadLetter>> {
         let mut conn = self.conn.clone();
         // Dead letters written by 0.1 come first: they are older than any written since.

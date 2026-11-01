@@ -22,6 +22,8 @@ pub struct ChainId<Out> {
 
 impl<Out> ChainId<Out> {
     /// Rebuilds a chain ID from a stored UUID. `Out` must match the chain's final output type.
+    /// Rebuilds a handle from a chain's UUID, for example one stored by another process.
+    /// Nothing checks that the chain's final output is really an `Out`.
     pub fn from_uuid(id: Uuid) -> Self {
         Self {
             id,
@@ -29,6 +31,7 @@ impl<Out> ChainId<Out> {
         }
     }
 
+    /// The chain's UUID, which [`ChainId::from_uuid`] turns back into a handle.
     pub fn uuid(&self) -> Uuid {
         self.id
     }
@@ -71,14 +74,25 @@ impl<Out> fmt::Display for ChainId<Out> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChainStatus<Out> {
     /// Step `step` of `total` is queued, running or waiting for a retry.
-    Running { step: usize, total: usize },
+    Running {
+        /// The step now queued or running.
+        step: usize,
+        /// Number of steps in the chain.
+        total: usize,
+    },
     /// The final step succeeded with this output.
     Completed(Out),
     /// Step `step` was dead-lettered with this error; later steps never ran.
-    Failed { step: usize, error: String },
+    Failed {
+        /// The step that was dead-lettered.
+        step: usize,
+        /// The error from its last attempt, with its causes.
+        error: String,
+    },
 }
 
 impl<Out> ChainStatus<Out> {
+    /// Whether the chain has completed or failed, so its status won't change again.
     pub fn is_finished(&self) -> bool {
         !matches!(self, Self::Running { .. })
     }
@@ -140,6 +154,11 @@ impl<'q, Out> ChainBuilder<'q, Out> {
     }
 
     /// Records the chain as running and enqueues its first step.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`](crate::Error::Serialization) if the input passed to
+    /// [`TaskQueue::chain`] couldn't be serialized, or [`Error::Redis`](crate::Error::Redis) if Redis can't be reached or the command fails.
     pub async fn submit(self) -> Result<ChainId<Out>> {
         let chain_id = Uuid::new_v4();
         let link = ChainLink {

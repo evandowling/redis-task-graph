@@ -16,7 +16,8 @@
 //! under a lease kept alive by heartbeats. If a worker crashes or stalls past its lease, another
 //! worker reclaims the task, so processors with side effects should be idempotent.
 
-#![warn(missing_debug_implementations)]
+#![forbid(unsafe_code)]
+#![warn(missing_docs, missing_debug_implementations, clippy::missing_errors_doc)]
 
 mod chain;
 mod client;

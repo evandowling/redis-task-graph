@@ -18,6 +18,7 @@ pub struct TaskType<In, Out> {
 }
 
 impl<In, Out> TaskType<In, Out> {
+    /// Names a processor type. Producers and workers must use the same name.
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
@@ -25,6 +26,7 @@ impl<In, Out> TaskType<In, Out> {
         }
     }
 
+    /// The processor type's name.
     pub const fn name(&self) -> &'static str {
         self.name
     }
@@ -47,6 +49,7 @@ impl<In, Out> fmt::Debug for TaskType<In, Out> {
 /// Anything that names a processor taking `In` and producing `Out`: a [`TaskType`], or a plain
 /// string for an untyped processor whose output is treated as `()`.
 pub trait IntoTaskType<In, Out> {
+    /// The processor type's name.
     fn into_name(self) -> String;
 }
 
@@ -89,8 +92,11 @@ impl fmt::Display for TaskId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TaskEnvelope {
+    /// Assigned at submission; kept across retries.
     pub id: TaskId,
+    /// Which processor runs this task.
     pub processor_type: String,
+    /// The serialized input passed to the processor.
     pub context: serde_json::Value,
     /// Number of previous failed attempts.
     #[serde(default)]
@@ -109,6 +115,7 @@ pub struct TaskEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ChainLink {
+    /// The chain this step belongs to; see [`ChainId::uuid`](crate::ChainId::uuid).
     pub chain_id: Uuid,
     /// Zero-based index of this step.
     pub step: usize,
@@ -119,6 +126,7 @@ pub struct ChainLink {
 }
 
 impl ChainLink {
+    /// Number of steps in the whole chain.
     pub fn total_steps(&self) -> usize {
         self.step + 1 + self.remaining.len()
     }

@@ -68,6 +68,7 @@ impl std::fmt::Debug for Registry {
 }
 
 impl Registry {
+    /// An empty registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -79,6 +80,10 @@ impl Registry {
     /// The task's lease is renewed for as long as the processor runs. To have hung processors
     /// detected and retried, or to stop when the lease is lost or the worker shuts down, use
     /// [`Registry::register_with_control`] instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DuplicateProcessor`] if a processor is already registered for `task`.
     pub fn register<In, Out, F, Fut>(
         &mut self,
         task: impl IntoTaskType<In, Out>,
@@ -97,6 +102,10 @@ impl Registry {
     /// cancellation. Once the processor calls [`TaskControl::beat`], it must keep beating at
     /// least once per lease: a processor that goes silent for a whole lease is aborted, and its
     /// task is retried. Combine with [`Registry::set_lease`] to detect hung processors quickly.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DuplicateProcessor`] if a processor is already registered for `task`.
     pub fn register_with_control<In, Out, F, Fut>(
         &mut self,
         task: impl IntoTaskType<In, Out>,
@@ -112,6 +121,10 @@ impl Registry {
     }
 
     /// The 0.1 name for [`Registry::register_with_control`].
+    ///
+    /// # Errors
+    ///
+    /// As for [`Registry::register_with_control`].
     #[deprecated(since = "0.2.0", note = "renamed to `register_with_control`")]
     pub fn register_with_heartbeat<In, Out, F, Fut>(
         &mut self,
@@ -163,6 +176,11 @@ impl Registry {
     /// Sets the lease for one registered processor type, overriding the worker's lease. A short
     /// lease means a crashed worker's tasks, or a processor that stops beating, are retried sooner.
     /// Every worker that runs this processor type should use the same lease for it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownProcessor`] if no processor is registered for `processor_type`. A lease
+    /// that is too short is rejected later, by [`Worker::spawn`](crate::Worker::spawn).
     pub fn set_lease(&mut self, processor_type: &str, lease: Duration) -> Result<&mut Self> {
         let processor = self
             .processors
@@ -172,10 +190,12 @@ impl Registry {
         Ok(self)
     }
 
+    /// The registered processor types, in no particular order.
     pub fn processor_types(&self) -> impl Iterator<Item = &str> {
         self.processors.keys().map(String::as_str)
     }
 
+    /// Whether no processors are registered.
     pub fn is_empty(&self) -> bool {
         self.processors.is_empty()
     }

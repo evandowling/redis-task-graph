@@ -205,6 +205,8 @@ pub struct Worker {
 }
 
 impl Worker {
+    /// Starts configuring a worker that runs `registry`'s processors on tasks from `queue`,
+    /// with [`WorkerConfig::default`] settings.
     pub fn builder(queue: TaskQueue, registry: Registry) -> Self {
         Self {
             queue,
@@ -213,16 +215,19 @@ impl Worker {
         }
     }
 
+    /// Replaces every setting at once.
     pub fn config(mut self, config: WorkerConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Sets [`WorkerConfig::concurrency`]; at least 1.
     pub fn concurrency(mut self, n: usize) -> Self {
         self.config.concurrency = n.max(1);
         self
     }
 
+    /// Sets [`WorkerConfig::min_concurrency`]; at least 1.
     pub fn min_concurrency(mut self, n: usize) -> Self {
         self.config.min_concurrency = n.max(1);
         self
@@ -234,37 +239,44 @@ impl Worker {
         self
     }
 
+    /// Sets [`WorkerConfig::max_scheduling_lag`], the lag that triggers pushback.
     pub fn max_scheduling_lag(mut self, d: Duration) -> Self {
         self.config.max_scheduling_lag = Some(d);
         self
     }
 
+    /// Sets [`WorkerConfig::batch_size`]; at least 1.
     pub fn batch_size(mut self, n: usize) -> Self {
         self.config.batch_size = n.max(1);
         self
     }
 
+    /// Sets [`WorkerConfig::block`]. Shorter blocks make shutdown quicker.
     pub fn block(mut self, d: Duration) -> Self {
         self.config.block = d;
         self
     }
 
+    /// Sets [`WorkerConfig::lease`], checked against [`MIN_LEASE`] when the worker spawns.
     pub fn lease(mut self, d: Duration) -> Self {
         self.config.lease = d;
         self
     }
 
+    /// Sets [`WorkerConfig::max_attempts`]; at least 1.
     pub fn max_attempts(mut self, n: u32) -> Self {
         self.config.max_attempts = n.max(1);
         self
     }
 
+    /// Sets the retry delay after the first failure and its upper bound.
     pub fn backoff(mut self, base: Duration, max: Duration) -> Self {
         self.config.backoff_base = base;
         self.config.backoff_max = max;
         self
     }
 
+    /// Sets [`WorkerConfig::promote_interval`]: how soon a due retry runs.
     pub fn promote_interval(mut self, d: Duration) -> Self {
         self.config.promote_interval = d;
         self
@@ -282,6 +294,7 @@ impl Worker {
         self
     }
 
+    /// Sets [`WorkerConfig::consumer_name`]. Defaults to `worker-<uuid>`.
     pub fn consumer_name(mut self, name: impl Into<String>) -> Self {
         self.config.consumer_name = name.into();
         self
@@ -291,6 +304,12 @@ impl Worker {
     ///
     /// Dropping the returned handle signals shutdown without waiting; call
     /// [`WorkerHandle::shutdown`] to wait for in-flight tasks to finish.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoProcessors`] for an empty registry, [`Error::InvalidConfig`] as for
+    /// [`WorkerConfig::validate`] or for a per-type lease that is too short, [`Error::Thread`]
+    /// if the monitor thread can't start, and [`Error::Redis`] if Redis can't be reached.
     pub async fn spawn(self) -> Result<WorkerHandle> {
         if self.registry.is_empty() {
             return Err(Error::NoProcessors);
@@ -433,6 +452,7 @@ impl std::fmt::Debug for WorkerHandle {
 }
 
 impl WorkerHandle {
+    /// The worker's consumer name within the group.
     pub fn consumer_name(&self) -> &str {
         &self.consumer_name
     }
