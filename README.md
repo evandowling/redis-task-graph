@@ -33,11 +33,12 @@ Related documents:
 - [Deployment and sizing](#deployment-and-sizing)
 - [Monitoring](#monitoring)
 - [Limitations](#limitations)
+- [Upgrading from 0.1](#upgrading-from-01)
 
 ## Requirements
 
 - **Rust 1.89 or newer** and a **Tokio** multi-threaded runtime.
-- **Redis 7.x**, or a compatible server such as Memurai on Windows. Redis Cluster is not supported (see [Limitations](#limitations)).
+- **Redis 7.x**, or a compatible server such as Memurai on Windows. Redis Cluster connections aren't supported yet (see [Limitations](#limitations)).
 - **`maxmemory-policy noeviction`** if Redis has a memory limit. Under any evicting policy, Redis can delete whole task streams or chain state when it fills up. Workers log a warning at startup when they can read the policy and it isn't `noeviction`.
 
 Add the crate from crates.io, plus serde and Tokio:
@@ -111,7 +112,7 @@ cargo run --release --example monitored --features otel -- 10   # 10-minute work
 
 ### Where tasks live
 
-Each processor type has its own Redis stream, `<namespace>:stream:<processor type>`. Submitting a task appends one entry to that stream. The entry holds the task's id, its JSON-encoded context, its attempt count and its submission time. Submitting needs no worker to be running: tasks wait in Redis until a worker that handles their type starts.
+Each processor type has its own Redis stream, `{<namespace>}:stream:<processor type>`. Every key starts with the namespace in braces, a Redis Cluster hash tag that keeps a namespace's keys together, so namespaces can't contain `{` or `}`. Submitting a task appends one entry to that stream. The entry holds the task's id, its JSON-encoded context, its attempt count and its submission time. Submitting needs no worker to be running: tasks wait in Redis until a worker that handles their type starts.
 
 All workers in a namespace join one Redis **consumer group**. Redis hands each stream entry to exactly one member of the group. That is how many workers, in one process or many, share the load without coordinating with each other.
 
@@ -301,7 +302,7 @@ How chains work:
 | Earlier deliveries never recorded an outcome, because their workers crashed or stalled | Each one counts as a failed attempt. Once they reach `max_attempts`, the task is dead-lettered without running again, so a task that crashes workers can't crash them forever. |
 
 - **Backoff:** the delay before retry *n* is `backoff_base × 2^(n-1)`, capped at `backoff_max` (1 s and 5 min by default). Jitter puts the actual delay at random in the upper half of that value.
-- **Where retries wait:** waiting retries are held in a sorted set. Each worker moves due retries back onto their streams every `promote_interval` (500 ms), so delays are accurate to about that interval.
+- **Where retries wait:** waiting retries are held in a sorted set per processor type. Each worker moves its types' due retries back onto their streams every `promote_interval` (500 ms), so delays are accurate to about that interval.
 - **Retried envelope:** a retried task keeps its task id. Its `attempt` count goes up, and `last_error` holds the most recent failure message.
 
 To inspect failures:
@@ -321,7 +322,7 @@ for letter in queue.dead_letters(100).await? {
 
 Entries that were never valid tasks, for example written by something other than this library, come back as `DeadLetter::Undecodable` with their raw payload. `DeadLetter` is `#[non_exhaustive]`, hence the catch-all arm.
 
-The dead-letter stream (`<namespace>:dead`) is capped at about `dead_letter_max_len` entries (100,000 by default), dropping the oldest. To replay a dead letter, submit its `context` again.
+The dead-letter stream (`{<namespace>}:dead`) is capped at about `dead_letter_max_len` entries (100,000 by default), dropping the oldest. To replay a dead letter, submit its `context` again.
 
 ## Delivery guarantees
 
@@ -506,7 +507,7 @@ Use a unique namespace per test so tests can run in parallel against one Redis s
 let ns = format!("test-{}", uuid::Uuid::new_v4());
 let queue = TaskQueue::connect("redis://127.0.0.1/", ns.clone()).await?;
 // ... submit, spawn a worker with short leases and backoff, assert, shut down ...
-// cleanup: delete keys matching "{ns}:*"
+// cleanup: delete keys matching "{<ns>}:*" (the braces are part of the key)
 ```
 
 Short timings keep tests fast: `.lease(Duration::from_millis(500))`, `.backoff(Duration::from_millis(10), Duration::from_millis(50))` and `.block(Duration::from_millis(100))`. [`tests/integration.rs`](tests/integration.rs) has many examples, including multi-worker and failure cases.
@@ -539,9 +540,18 @@ For lighter needs, `WorkerHandle::stats()` gives the live concurrency limit, tas
 
 ## Limitations
 
-- **No Redis Cluster.** The scripts derive stream keys from task payloads, so all of a namespace's keys must live on one Redis node.
+- **No Redis Cluster connections yet.** The key layout is ready for Cluster (every key a script touches shares the namespace's hash slot), but `TaskQueue` connects with a standalone client. A namespace will always live on one Cluster node; spread load across namespaces.
 - **No fan-out or fan-in yet.** Chains are linear: each step has one input and one output.
 - **No priorities or per-type rate limits.** A worker reads all its streams with equal weight. Use separate pools to isolate types.
 - **Chain status is polled.** `wait_for_chain` polls every 25 ms; there's no push notification.
 - **Clock-based timing.** Retry due times use the Redis server's clock. The queue-time metric uses the producer's and worker's clocks, so skew between machines shows up in it.
 - **Consumer entries accumulate.** Each worker adds a consumer to the group under its `consumer_name`, and the library doesn't remove them. With random names, the group's consumer list grows over restarts. Fixed names avoid that, but two live workers must never share a name.
+
+## Upgrading from 0.1
+
+0.2 moved every key into a hash tag (`app:stream:email` became `{app}:stream:email`) and gave each processor type its own retry set. Upgrades need no downtime:
+1. **Upgrade workers first.** A 0.2 worker also reads the 0.1 streams of its processor types and the 0.1 retry set, and finishes those tasks in the 0.1 layout, so 0.1 workers and producers keep working alongside it.
+2. **Then upgrade producers.** 0.2 producers write the new layout, which only 0.2 workers read.
+3. **Clean up.** Once the old streams (`app:stream:*`) and `app:delayed` are empty and nothing runs 0.1, delete them, and restart the workers so they stop reading them. `dead_letters()` and `chain_status` keep reading `app:dead` and `app:chain:*` until you delete those too.
+
+A 0.1 stream is only picked up when a worker starts, so restart workers once after every 0.1 producer is gone.

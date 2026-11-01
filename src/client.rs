@@ -9,8 +9,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::chain::{ChainBuilder, ChainId, ChainStatus, parse_status};
-use crate::error::Result;
-use crate::keys::Keys;
+use crate::error::{Error, Result};
+use crate::keys::{self, Keys};
 use crate::task::{IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
 
 /// An entry in the dead-letter stream, from [`TaskQueue::dead_letters`].
@@ -94,6 +94,10 @@ impl TaskQueue {
     }
 
     pub async fn from_client(client: redis::Client, namespace: impl Into<String>) -> Result<Self> {
+        let namespace = namespace.into();
+        if !keys::valid_namespace(&namespace) {
+            return Err(Error::InvalidNamespace(namespace));
+        }
         let conn = client.get_connection_manager().await?;
         Ok(Self {
             client,
@@ -186,7 +190,11 @@ impl TaskQueue {
         chain: &ChainId<Out>,
     ) -> Result<Option<ChainStatus<Out>>> {
         let mut conn = self.conn.clone();
-        let fields: HashMap<String, String> = conn.hgetall(self.keys.chain(&chain.uuid())).await?;
+        let mut fields: HashMap<String, String> = conn.hgetall(self.keys.chain(&chain.uuid())).await?;
+        if fields.is_empty() {
+            // A chain submitted by 0.1 keeps its status under the 0.1 key.
+            fields = conn.hgetall(self.keys.legacy().chain(&chain.uuid())).await?;
+        }
         parse_status(fields)
     }
 
@@ -211,9 +219,17 @@ impl TaskQueue {
     /// are returned as [`DeadLetter::Undecodable`] rather than failing the whole call.
     pub async fn dead_letters(&self, count: usize) -> Result<Vec<DeadLetter>> {
         let mut conn = self.conn.clone();
-        let reply: StreamRangeReply = conn.xrange_count(self.keys.dead(), "-", "+", count).await?;
-        Ok(reply
-            .ids
+        // Dead letters written by 0.1 come first: they are older than any written since.
+        let mut entries = Vec::with_capacity(count);
+        for key in [self.keys.legacy().dead(), self.keys.dead()] {
+            let remaining = count - entries.len();
+            if remaining == 0 {
+                break;
+            }
+            let reply: StreamRangeReply = conn.xrange_count(key, "-", "+", remaining).await?;
+            entries.extend(reply.ids);
+        }
+        Ok(entries
             .iter()
             .map(|entry| DeadLetter::decode(entry.get::<String>(PAYLOAD_FIELD)))
             .collect())

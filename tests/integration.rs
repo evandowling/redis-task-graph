@@ -42,9 +42,11 @@ impl Drop for TestQueue {
     fn drop(&mut self) {
         // Best-effort cleanup of this test's namespace.
         let mut conn = self.conn.clone();
-        let pattern = format!("{}:*", self.queue.namespace());
+        // Current keys carry the namespace in a hash tag; 0.1 keys (from migration tests) don't.
+        let ns = self.queue.namespace().to_owned();
         tokio::spawn(async move {
-            let keys: Vec<String> = conn.keys(pattern).await.unwrap_or_default();
+            let mut keys: Vec<String> = conn.keys(format!("{{{ns}}}:*")).await.unwrap_or_default();
+            keys.extend(conn.keys::<_, Vec<String>>(format!("{ns}:*")).await.unwrap_or_default());
             if !keys.is_empty() {
                 let _: redis::RedisResult<()> = conn.del(keys).await;
             }
@@ -683,7 +685,7 @@ mod chains {
         worker.shutdown().await;
         assert_eq!(status, Some(ChainStatus::Completed(3)));
 
-        let key = format!("{}:chain:{}", t.queue.namespace(), chain.uuid());
+        let key = format!("{{{}}}:chain:{}", t.queue.namespace(), chain.uuid());
         let ttl: i64 = t.conn.ttl(&key).await.unwrap();
         assert!((1..=30).contains(&ttl), "ttl = {ttl}");
     }
@@ -1216,5 +1218,80 @@ mod leases {
         reg.set_lease("t", Duration::from_millis(50)).unwrap();
         let short_type = fast(Worker::builder(t.queue.clone(), reg));
         assert!(matches!(short_type.spawn().await, Err(Error::InvalidConfig(_))));
+    }
+}
+
+/// Data written in the 0.1 key layout is drained by 0.2 workers.
+mod migration {
+    use super::*;
+    use redis_task_graph::{ChainId, ChainStatus, TaskType};
+
+    const OLD: TaskType<Ctx, u32> = TaskType::new("old");
+
+    fn envelope(n: u32, chain: Option<uuid::Uuid>) -> String {
+        let mut env = serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "processor_type": "old",
+            "context": ctx(n),
+            "attempt": 0,
+            "enqueued_at": 0,
+        });
+        if let Some(chain_id) = chain {
+            env["chain"] = serde_json::json!({
+                "chain_id": chain_id, "step": 0, "remaining": [], "result_ttl_secs": 60,
+            });
+        }
+        env.to_string()
+    }
+
+    #[tokio::test]
+    async fn tasks_retries_and_chains_from_0_1_are_drained() {
+        let Some(mut t) = setup().await else { return };
+        let ns = t.queue.namespace().to_owned();
+        let (old_stream, old_delayed) = (format!("{ns}:stream:old"), format!("{ns}:delayed"));
+        // As 0.1 left them: a stream with its group and a queued task that is the last step of
+        // a chain, and a due retry in the shared retry set.
+        let _: () = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(&old_stream)
+            .arg(t.queue.group_name())
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(&mut t.conn)
+            .await
+            .unwrap();
+        let chain = uuid::Uuid::new_v4();
+        let _: String = t.conn.xadd(&old_stream, "*", &[("task", envelope(1, Some(chain)))]).await.unwrap();
+        let _: () = t.conn.zadd(&old_delayed, envelope(2, None), 0).await.unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        let s = seen.clone();
+        reg.register(OLD, move |c: Ctx| {
+            let s = s.clone();
+            async move {
+                s.lock().unwrap().push(c.n);
+                Ok(c.n * 10)
+            }
+        })
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let both = eventually(Duration::from_secs(5), || async { seen.lock().unwrap().len() == 2 }).await;
+        worker.shutdown().await;
+        assert!(both, "ran {:?}", seen.lock().unwrap());
+
+        let status = t.queue.chain_status(&ChainId::<u32>::from_uuid(chain)).await.unwrap();
+        assert_eq!(status, Some(ChainStatus::Completed(10)), "the 0.1 chain's status is still readable");
+        let left: usize = t.conn.xlen(&old_stream).await.unwrap();
+        let retries: usize = t.conn.zcard(&old_delayed).await.unwrap();
+        assert_eq!((left, retries), (0, 0));
+        assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn namespaces_with_braces_are_rejected() {
+        let client = redis::Client::open(redis_url()).unwrap();
+        let err = TaskQueue::from_client(client, "a{b}").await.unwrap_err();
+        assert!(matches!(err, redis_task_graph::Error::InvalidNamespace(_)), "{err}");
     }
 }

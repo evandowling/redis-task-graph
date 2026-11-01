@@ -9,6 +9,9 @@ include breaking changes.
 
 ### Breaking
 
+- **New key layout.** Every key now starts with the namespace in a hash tag (`{app}:stream:email` instead of `app:stream:email`), and each processor type has its own retry set (`{app}:delayed:email`). Every script now receives all the keys it touches, so the layout is ready for Redis Cluster. 0.2 workers drain 0.1 streams and retries, and `dead_letters()` and `chain_status` read 0.1 data too; see "Upgrading from 0.1" in the README.
+- **Namespaces can't be empty or contain `{` or `}`.** `TaskQueue::connect` returns the new `Error::InvalidNamespace`.
+- **`rtg.queue.delayed` is labelled by `set`** (the retry set's key) instead of `namespace`, since each worker now samples only its own types' sets.
 - **`Heartbeat` is now `TaskControl`, and `register_with_heartbeat` is now `register_with_control`.** The old names remain as deprecated aliases. `TaskControl` adds cancellation: `is_cancelled()`, `cancelled().await` and `cancel_reason()` report `CancelReason::LeaseLost` when another worker takes the task over, and `CancelReason::Shutdown` when the worker shuts down.
 - **Shutdown cancels in-flight tasks.** `WorkerHandle::shutdown` now signals running processors before waiting for them. A controlled processor that returns an error after the signal has its task released: requeued at once without using an attempt. Tasks claimed but not yet started at shutdown are released without running.
 - **`TaskQueue::dead_letters` returns `Vec<DeadLetter>`.** `DeadLetter::Task` holds the task; `DeadLetter::Undecodable { payload, error }` holds an entry that was never a valid task. Previously one such entry made the whole call fail, and entries with no payload field were silently skipped. Use `DeadLetter::task()` or `into_task()` to get the envelope.

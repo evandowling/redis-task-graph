@@ -43,7 +43,7 @@ For the public API and usage, read [`README.md`](README.md) first. Measured numb
 | `src/limiter.rs` | Fair, resizable concurrency limiter on top of `tokio::sync::Semaphore` |
 | `src/monitor.rs` | Per-worker OS thread: lag measurement, pushback `Controller`, lease renewal |
 | `src/control.rs` | `TaskControl` (processor beats and cancellation), `CancelReason`, and `Liveness`, the per-task state the monitor checks before renewing |
-| `src/scripts.rs` | Every Lua script (`ACK`, `ADVANCE`, `COMPLETE`, `RETRY_OR_DEAD`, `HEARTBEAT`, `PROMOTE`) |
+| `src/scripts.rs` | Every Lua script (`ACK`, `ADVANCE`, `COMPLETE`, `RETRY_OR_DEAD`, `HEARTBEAT`, `PROMOTE`, `LEGACY_PROMOTE`) |
 | `src/keys.rs` | Redis key naming |
 | `src/telemetry.rs` | OpenTelemetry instruments behind the `otel` feature, with no-op stubs otherwise |
 | `src/error.rs` | `Error`, `Result`, `BoxError` |
@@ -61,7 +61,7 @@ These decisions shaped everything else. Keep them in mind before changing the co
 | Goal | Decision | Cost accepted |
 |---|---|---|
 | Normally exactly-once, cheap per task | A lease per claimed entry, using the Redis Streams pending-entries list (PEL), plus an ownership check in every finalizing script | Duplicates are possible when a lease expires while the task is still running (section 13) |
-| No coordination between workers | One consumer group per namespace; Redis assigns each entry to one consumer | Needs a single Redis node (no Cluster) |
+| No coordination between workers | One consumer group per namespace; Redis assigns each entry to one consumer | A namespace lives in one Cluster slot, so one namespace can't use more than one node's capacity |
 | Atomic state changes | Each outcome is one Lua script | Scripts run on Redis's single thread, so script work is the throughput ceiling |
 | Typed API over an untyped store | `TaskType<In,Out>` is a zero-sized phantom wrapper around a name; contexts are JSON | Type safety holds only if every process agrees on the name-to-type mapping |
 | Workers survive bad processors | Leases are renewed off the runtime; pushback limits admission | One OS thread per worker; scheduling lag is sampled every 10 ms |
@@ -69,15 +69,25 @@ These decisions shaped everything else. Keep them in mind before changing the co
 
 ## 3. Redis data model
 
-All keys share the namespace prefix `ns` from `TaskQueue::connect(url, ns)`. See `src/keys.rs`.
+Every key starts with the namespace `ns` from `TaskQueue::connect(url, ns)` in a hash tag, `{ns}`, so all of a namespace's keys hash to one Redis Cluster slot and every script can touch several of them. Namespaces must be non-empty and free of `{` and `}` (`Error::InvalidNamespace`). See `src/keys.rs`.
 
 | Key | Type | Contents |
 |---|---|---|
 | `{ns}:stream:{type}` | Stream | One entry per pending task, with field `task` holding the envelope JSON. Entries are deleted (`XDEL`) once their outcome is recorded, so stream length ≈ backlog plus in flight. |
-| `{ns}:workers` | Consumer group (on every stream) | Created with `XGROUP CREATE … 0 MKSTREAM` when a worker starts. Starting at `0` delivers tasks submitted before any worker existed. `BUSYGROUP` errors are ignored. |
-| `{ns}:delayed` | Sorted set | Envelope JSON of waiting retries, scored by due time in milliseconds of Redis server time |
+| `ns:workers` | Consumer group (on every stream) | Created with `XGROUP CREATE … 0 MKSTREAM` when a worker starts. Starting at `0` delivers tasks submitted before any worker existed. `BUSYGROUP` errors are ignored. |
+| `{ns}:delayed:{type}` | Sorted set | Envelope JSON of one processor type's waiting retries, scored by due time in milliseconds of Redis server time |
 | `{ns}:chain:{uuid}` | Hash | Chain status: `state` (`running`, `completed` or `failed`), `step`, `total`, plus `output` or `error`. Gets a TTL when the chain finishes. |
 | `{ns}:dead` | Stream | Dead-lettered envelopes (field `task`), capped with `XADD MAXLEN ~` |
+
+The consumer group name is a name, not a key, so it has no hash tag.
+
+**The 0.1 layout.** 0.1 used the same names without the hash tag (`ns:stream:{type}`, `ns:chain:{uuid}`, `ns:dead`) and one shared retry set, `ns:delayed`. `Keys::legacy()` builds those names. To drain 0.1 data after an upgrade:
+- **Streams:** `Worker::spawn` checks each of its types for a 0.1 stream (`EXISTS`). Any it finds join the worker's stream list with a 0.1 `StreamInfo::keys`, so they're read, reclaimed and leased like any other.
+- **Finalizing:** a task is finalized in the layout it was claimed from. A 0.1 chain step advances into the 0.1 stream and updates the 0.1 chain hash, and a 0.1 retry goes to `ns:delayed`, so 0.1 workers still running during a rolling upgrade see consistent state.
+- **Retries:** if any 0.1 stream or `ns:delayed` exists at spawn, `promote_loop` also runs `LEGACY_PROMOTE`, the 0.1 script, on `ns:delayed`.
+- **Reads:** `dead_letters()` returns 0.1 dead letters first, and `chain_status` falls back to the 0.1 chain key when the current one is missing.
+
+A 0.1 stream is only picked up at spawn: one created later (for example by a 0.1 producer writing a type no 0.1 worker had read before) waits for the next worker restart.
 
 **Ownership state lives in the PEL.** The library keeps no "claimed by" field of its own. An entry is owned by the consumer that the stream's PEL lists for it. Its lease age is the PEL's idle time:
 - `XREADGROUP` and `XAUTOCLAIM` set the owner.
@@ -93,7 +103,7 @@ Every script checks ownership with `XPENDING stream group id id 1 consumer`.
 ```rust
 pub struct TaskEnvelope {
     pub id: TaskId,               // UUID v4, stable across retries
-    pub processor_type: String,   // also determines the stream; PROMOTE reads it
+    pub processor_type: String,   // also determines the stream and retry set
     pub context: serde_json::Value,
     pub attempt: u32,             // failed attempts so far
     pub enqueued_at: u64,         // ms since epoch, producer clock
@@ -210,7 +220,8 @@ end
 | `COMPLETE` | stream, chain | `XACK`, `XDEL`, `HSET state=completed output=…`, `EXPIRE ttl` | 1 / 0 |
 | `RETRY_OR_DEAD` | stream, delayed, dead, chain (optional) | `XACK`, `XDEL`, then `ZADD` at `TIME + delay` (retry), or `XADD MAXLEN ~` to dead plus marking the chain failed with a TTL (dead) | 1 / 0 |
 | `HEARTBEAT` | stream | If the entry is pending and owned by us, `XCLAIM … 0 JUSTID` to reset idle time | 1 renewed, 0 owned by someone else, -1 no longer pending |
-| `PROMOTE` | delayed, dead | Moves up to `limit` due members from the sorted set onto `prefix .. processor_type` streams; payloads that won't decode go to dead | Number moved |
+| `PROMOTE` | delayed (one type), stream (same type) | Moves up to `limit` due members from the type's sorted set onto its stream, without decoding them | Number moved |
+| `LEGACY_PROMOTE` | 0.1 delayed, dead | The 0.1 promotion: routes each due member to `prefix .. processor_type`; payloads that won't decode go to dead | Number moved |
 
 **Invariant: a worker that lost ownership can never change state.**
 - The finalize scripts return 0 and do nothing. The worker counts that as `lease_lost` and logs it.
@@ -218,7 +229,7 @@ end
 
 This is what turns "at-least-once execution" into "effectively-once state transitions".
 
-**Cluster incompatibility.** `PROMOTE` builds stream keys from payload contents, and `RETRY_OR_DEAD` and `ADVANCE` touch keys under several names. Supporting Redis Cluster would need hash tags (`{ns}`) on every key *and* would need `PROMOTE` to receive its keys rather than derive them.
+**Cluster readiness.** Every script receives all the keys it touches in `KEYS`, and all of them share the `{ns}` slot. The exception is `LEGACY_PROMOTE`, which builds 0.1 stream keys from payloads; it runs only while 0.1 data exists, which can only be on standalone Redis. `TaskQueue` still connects with a standalone `redis::Client`, so running on a Cluster also needs cluster-client support.
 
 Scripts are `LazyLock<redis::Script>` and are invoked with `EVALSHA`. The redis crate loads a script on `NOSCRIPT` and retries.
 
@@ -340,10 +351,10 @@ Controller unit tests are at the bottom of `monitor.rs`. The integration test `b
 
 - **Backoff:** `backoff(attempt, base, max)` computes `base·2^(attempt−1)` capped at `max`, then jitters uniformly within `[d/2, d]`. Unit test: `backoff_grows_and_caps`.
 - **Scheduling a retry:** `RETRY_OR_DEAD` in `retry` mode computes the due time from Redis `TIME`, so worker clock skew doesn't matter. It then `ZADD`s the updated envelope JSON, with `attempt` incremented and `last_error` set, as the member. The JSON is unique per task and attempt because it includes the task id and the attempt.
-- **Promotion:** `promote_loop` runs `PROMOTE` every `promote_interval`, moving up to 100 due members per call. It loops while a call moves all 100. Every worker in a namespace runs this loop. Running it more than once is harmless because the script is atomic: a member is moved once.
+- **Promotion:** `promote_loop` runs `PROMOTE` every `promote_interval` for each of the worker's processor types, moving up to 100 due members per call. It loops while a call moves all 100. Every worker promotes the retries of the types it runs, so a type's retries wait until a worker for that type is running, like its queued tasks. Running it more than once is harmless because the script is atomic: a member is moved once.
 - **Dead letters:** `XADD {ns}:dead MAXLEN ~ dead_letter_max_len`.
   - Undecodable entries are stored as `{"raw": <payload>, "last_error": …}` rather than as a `TaskEnvelope`.
-  - Retries whose payload `PROMOTE` can't route are dead-lettered verbatim.
+  - 0.1 retries whose payload `LEGACY_PROMOTE` can't route are dead-lettered verbatim.
   - `dead_letters()` returns `DeadLetter::Task` for valid envelopes and `DeadLetter::Undecodable { payload, error }` for both kinds of bad entry (unwrapping `{raw, last_error}`), and for entries with no payload field. One bad entry never fails the call.
 - **Error classes** (`registry.rs`, `HandlerError`):
 
@@ -411,7 +422,7 @@ The full results are in [`performance_readme.md`](performance_readme.md). This s
 | Chain final step | 1 script: `XPENDING`, `XACK`, `XDEL`, `HSET`, `EXPIRE` |
 | Failure | 1 script: `XPENDING`, `XACK`, `XDEL`, then `ZADD` or `XADD` (plus `HSET`/`EXPIRE` for a dead chain step) |
 | Heartbeat | 1 script per 128 due leases per tick; each task is due every lease/3, only if it runs longer than that |
-| Background | `XAUTOCLAIM` per stream per lease/2; `PROMOTE` per 500 ms; (otel) 1 pipeline per 5 s |
+| Background | `XAUTOCLAIM` per stream per lease/2; `PROMOTE` per processor type per 500 ms; (otel) 1 pipeline per 5 s |
 
 ### Where the limits are
 
@@ -460,7 +471,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count, with `--features otel`, is 58: 29 integration tests, 25 unit tests, 1 telemetry test and 3 doctests.
+The current count, with `--features otel`, is 62: 31 integration tests, 27 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 
@@ -537,7 +548,7 @@ git worktree remove ../rtg-baseline
 - **Fan-out and fan-in.** Chains are linear. A DAG layer would extend `ChainLink`, or replace it with a graph id plus a join counter in the status hash, decremented atomically by a script.
 - **Consumer cleanup.** Consumers are never removed from the group (`XGROUP DELCONSUMER`). Random default names make the list grow across restarts.
 - **Abort on lease loss.** Lease loss only *signals* the processor (`CancelReason::LeaseLost`). Aborting processors that ignore the signal would cut duplicate side effects further, but could interrupt them mid-operation.
-- **Redis Cluster.** Needs hash-tagged keys and a `PROMOTE` that receives its keys rather than deriving them.
+- **Redis Cluster.** The key layout and scripts are Cluster-ready (section 3); what remains is connecting through `redis::cluster` and testing against a real Cluster.
 - **Push-based chain completion.** `wait_for_chain` polls; keyspace notifications or a per-chain stream would remove that.
 
 ## 19. Releasing

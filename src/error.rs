@@ -24,6 +24,9 @@ pub enum Error {
 
     #[error("invalid worker configuration: {0}")]
     InvalidConfig(String),
+
+    #[error("invalid namespace `{0}`: it must be non-empty and contain no `{{` or `}}`")]
+    InvalidNamespace(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

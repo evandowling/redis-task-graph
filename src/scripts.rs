@@ -118,9 +118,28 @@ return statuses
     )
 });
 
-/// KEYS: delayed, dead. ARGV: stream_prefix, limit, field, dead_max_len.
-/// Moves due retries back onto their processor type's stream. Returns the number moved.
+/// KEYS: one processor type's delayed set, that type's stream. ARGV: limit, field.
+/// Moves due retries back onto the stream. Returns the number moved.
 pub(crate) static PROMOTE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, tonumber(ARGV[1]))
+for _, payload in ipairs(due) do
+  redis.call('XADD', KEYS[2], '*', ARGV[2], payload)
+  redis.call('ZREM', KEYS[1], payload)
+end
+return #due
+",
+    )
+});
+
+/// KEYS: the 0.1 shared delayed set, dead. ARGV: 0.1 stream_prefix, limit, field, dead_max_len.
+/// Moves due 0.1 retries back onto their processor type's 0.1 stream. Returns the number moved.
+/// It builds stream keys from task data, which is why 0.2 replaced it; it runs only while a
+/// namespace still has 0.1 data, which can only exist on a standalone Redis.
+pub(crate) static LEGACY_PROMOTE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
 local t = redis.call('TIME')

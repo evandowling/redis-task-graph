@@ -23,7 +23,7 @@
 //! | `rtg.worker.concurrency_limit`, `rtg.worker.in_flight` | gauge | `worker` |
 //! | `rtg.worker.scheduling_lag` | gauge (s) | `worker` |
 //! | `rtg.queue.depth`, `rtg.queue.pending` | gauge | `stream` |
-//! | `rtg.queue.delayed` | gauge | `namespace` |
+//! | `rtg.queue.delayed` | gauge | `set` (the retry set's key: one per processor type) |
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ClaimSource {
@@ -222,7 +222,7 @@ mod imp {
         at: Instant,
     }
 
-    /// Latest sampled queue sizes by stream, and delayed-retry counts by namespace.
+    /// Latest sampled queue sizes by stream, and delayed-retry counts by retry set.
     static QUEUES: LazyLock<Mutex<HashMap<String, QueueSample>>> = LazyLock::new(Default::default);
     static DELAYED: LazyLock<Mutex<HashMap<String, (u64, Instant)>>> = LazyLock::new(Default::default);
 
@@ -336,9 +336,9 @@ mod imp {
                     .u64_observable_gauge("rtg.queue.delayed")
                     .with_description("Tasks waiting for a retry")
                     .with_callback(|observer| {
-                        for (ns, (n, at)) in DELAYED.lock().unwrap().iter() {
+                        for (set, (n, at)) in DELAYED.lock().unwrap().iter() {
                             if at.elapsed() < STALE_AFTER {
-                                observer.observe(*n, &[KeyValue::new("namespace", ns.clone())]);
+                                observer.observe(*n, &[KeyValue::new("set", set.clone())]);
                             }
                         }
                     })
@@ -371,8 +371,8 @@ mod imp {
         QUEUES.lock().unwrap().insert(stream.to_owned(), sample);
     }
 
-    pub(crate) fn record_delayed(namespace: &str, delayed: u64) {
-        DELAYED.lock().unwrap().insert(namespace.to_owned(), (delayed, Instant::now()));
+    pub(crate) fn record_delayed(set: &str, delayed: u64) {
+        DELAYED.lock().unwrap().insert(set.to_owned(), (delayed, Instant::now()));
     }
 
     #[cfg(test)]

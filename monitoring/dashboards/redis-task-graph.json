@@ -423,7 +423,7 @@
                                                                        }
                                                         },
                                                         {
-                                                            "query":  "max by (namespace) (rtg_queue_delayed)",
+                                                            "query":  "max by (set) (rtg_queue_delayed)",
                                                             "customQuery":  true,
                                                             "fields":  {
                                                                            "stream":  "",

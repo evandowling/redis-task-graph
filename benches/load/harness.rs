@@ -359,7 +359,7 @@ pub async fn connect(ns: &str) -> TaskQueue {
 pub async fn cleanup(ns: &str) {
     let client = redis::Client::open(REDIS_URL).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-    let keys: Vec<String> = conn.keys(format!("{ns}:*")).await.unwrap();
+    let keys: Vec<String> = conn.keys(format!("{{{ns}}}:*")).await.unwrap();
     for chunk in keys.chunks(1000) {
         let _: () = conn.del(chunk).await.unwrap();
     }

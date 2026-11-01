@@ -3,15 +3,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamAutoClaimReply, StreamId, StreamPendingCountReply, StreamReadOptions, StreamReadReply};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::client::TaskQueue;
 use crate::error::{Error, Result};
+use crate::keys::Keys;
 use crate::control::{CancelReason, Liveness, TaskControl};
 use crate::limiter::{Limiter, Permit};
 use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
@@ -293,36 +295,47 @@ impl Worker {
         if self.registry.is_empty() {
             return Err(Error::NoProcessors);
         }
-        let mut streams: Vec<String> = self
-            .registry
-            .processor_types()
-            .map(|t| self.queue.stream_key(t))
-            .collect();
-        streams.sort();
-        // Each stream's lease: its processor type's, or the worker's.
-        let stream_prefix = self.queue.keys.stream_prefix();
-        let processor_type = |s: &str| s.strip_prefix(stream_prefix.as_str()).unwrap_or(s).to_owned();
-        let per_stream: HashMap<String, StreamInfo> = streams
-            .iter()
+        self.config.validate()?;
+        let mut conn = self.queue.conn.clone();
+        warn_if_evicting(&mut conn).await;
+
+        // Each processor type's stream, plus its 0.1 stream while one exists, so tasks written
+        // before an upgrade are still run. Those are finalized in the 0.1 layout.
+        let keys = self.queue.keys.clone();
+        let legacy = Arc::new(keys.legacy());
+        let mut layouts: Vec<(String, String, Arc<Keys>)> = Vec::new();
+        for processor_type in self.registry.processor_types() {
+            layouts.push((keys.stream(processor_type), processor_type.to_owned(), keys.clone()));
+            let old = legacy.stream(processor_type);
+            if conn.exists::<_, bool>(&old).await? {
+                info!(stream = old, "reading a 0.1 stream until it is drained");
+                layouts.push((old, processor_type.to_owned(), legacy.clone()));
+            }
+        }
+        layouts.sort_by(|a, b| a.0.cmp(&b.0));
+        let legacy_retries = layouts.iter().any(|(_, _, k)| k.is_legacy())
+            || conn.exists::<_, bool>(legacy.delayed("")).await?;
+        let streams: Vec<String> = layouts.iter().map(|(s, _, _)| s.clone()).collect();
+        let per_stream: HashMap<String, StreamInfo> = layouts
+            .into_iter()
             .enumerate()
-            .map(|(index, s)| {
-                let processor_type = processor_type(s);
+            .map(|(index, (stream, processor_type, keys))| {
+                // Each stream's lease: its processor type's, or the worker's.
                 let lease = self.registry.get(&processor_type).and_then(|p| p.lease);
                 let info = StreamInfo {
-                    index: u32::try_from(index).expect("fewer than 2^32 processor types"),
+                    index: u32::try_from(index).expect("fewer than 2^32 streams"),
                     metrics: telemetry::handle(&processor_type),
                     lease: lease.unwrap_or(self.config.lease),
+                    delayed: keys.delayed(&processor_type),
+                    keys,
                 };
-                (s.clone(), info)
+                (stream, info)
             })
             .collect();
-        self.config.validate()?;
         for (stream, info) in &per_stream {
             check_lease(stream, info.lease, self.config.probe_interval)?;
         }
 
-        let mut conn = self.queue.conn.clone();
-        warn_if_evicting(&mut conn).await;
         let group = self.queue.group_name();
         for stream in &streams {
             create_group(&mut conn, stream, &group).await?;
@@ -361,6 +374,8 @@ impl Worker {
             group,
             streams,
             per_stream,
+            dead: keys.dead(),
+            legacy_retries,
             queue: self.queue,
             registry: self.registry,
             config,
@@ -443,6 +458,11 @@ struct StreamInfo {
     metrics: telemetry::TypeHandle,
     /// Lease for the stream's tasks: its processor type's, or the worker's.
     lease: Duration,
+    /// The key layout the stream belongs to: current, or 0.1 while its data drains. A task
+    /// is finalized in the layout it was claimed from.
+    keys: Arc<Keys>,
+    /// Where the stream's retries wait: its processor type's delayed set.
+    delayed: String,
 }
 
 struct Inner {
@@ -451,8 +471,12 @@ struct Inner {
     config: WorkerConfig,
     group: String,
     streams: Vec<String>,
-    /// Metrics and lease for each stream, resolved once at spawn.
+    /// Metrics, lease and key layout for each stream, resolved once at spawn.
     per_stream: HashMap<String, StreamInfo>,
+    /// The dead-letter stream, shared by both layouts.
+    dead: String,
+    /// Whether 0.1 retries may exist, so the 0.1 delayed set must be promoted too.
+    legacy_retries: bool,
     /// Concurrency limiter, renewed leases and lag stats, shared with the monitor thread.
     monitored: Arc<Monitored>,
     in_flight: AtomicUsize,
@@ -775,13 +799,17 @@ async fn delivery_counts(
 async fn sample_queues(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
     const INTERVAL: Duration = Duration::from_secs(5);
     let mut conn = inner.queue.conn.clone();
-    let delayed_key = inner.queue.keys.delayed();
+    // Every retry set this worker's streams use: one per type, plus the 0.1 shared set.
+    let delayed_keys: std::collections::BTreeSet<&str> =
+        inner.per_stream.values().map(|info| info.delayed.as_str()).collect();
     loop {
         let mut pipe = redis::pipe();
         for stream in &inner.streams {
             pipe.xlen(stream).cmd("XPENDING").arg(stream).arg(&inner.group);
         }
-        pipe.zcard(&delayed_key);
+        for key in &delayed_keys {
+            pipe.zcard(*key);
+        }
         let reply: redis::RedisResult<Vec<redis::Value>> = pipe.query_async(&mut conn).await;
         match reply {
             Ok(values) => {
@@ -794,8 +822,10 @@ async fn sample_queues(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
                         .unwrap_or(0);
                     telemetry::record_queue(stream, depth, pending);
                 }
-                if let Some(delayed) = values.last().and_then(|v| redis::from_redis_value_ref(v).ok()) {
-                    telemetry::record_delayed(inner.queue.namespace(), delayed);
+                for (set, value) in delayed_keys.iter().zip(&values[inner.streams.len() * 2..]) {
+                    if let Ok(delayed) = redis::from_redis_value_ref::<u64>(value) {
+                        telemetry::record_delayed(set, delayed);
+                    }
                 }
             }
             Err(e) => debug!(error = %e, "failed to sample queue sizes"),
@@ -809,25 +839,54 @@ async fn sample_queues(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
 async fn promote_loop(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
     const LIMIT: usize = 100;
     let mut conn = inner.queue.conn.clone();
-    let keys = &inner.queue.keys;
+    let legacy = inner.queue.keys.legacy();
+    // Each current-layout stream's retries, promoted by this worker because it runs that type.
+    let targets: Vec<(&str, &str)> = inner
+        .streams
+        .iter()
+        .map(|s| (s.as_str(), &inner.per_stream[s]))
+        .filter(|(_, info)| !info.keys.is_legacy())
+        .map(|(s, info)| (info.delayed.as_str(), s))
+        .collect();
     while !sleep_or_stop(&mut shutdown, inner.config.promote_interval).await {
-        loop {
-            let moved: redis::RedisResult<usize> = scripts::PROMOTE
-                .key(keys.delayed())
-                .key(keys.dead())
-                .arg(keys.stream_prefix())
-                .arg(LIMIT)
-                .arg(PAYLOAD_FIELD)
-                .arg(inner.config.dead_letter_max_len)
-                .invoke_async(&mut conn)
-                .await;
-            match moved {
-                Ok(n) if n >= LIMIT => continue,
-                Ok(_) => break,
-                Err(e) => {
-                    warn!(error = %e, "failed to promote delayed tasks");
-                    break;
-                }
+        for &(delayed, stream) in &targets {
+            let promote = || {
+                let mut invocation = scripts::PROMOTE.prepare_invoke();
+                invocation.key(delayed).key(stream).arg(LIMIT).arg(PAYLOAD_FIELD);
+                invocation
+            };
+            promote_all(&mut conn, promote, LIMIT).await;
+        }
+        if inner.legacy_retries {
+            let promote = || {
+                let mut invocation = scripts::LEGACY_PROMOTE.prepare_invoke();
+                invocation
+                    .key(legacy.delayed(""))
+                    .key(&inner.dead)
+                    .arg(legacy.stream_prefix())
+                    .arg(LIMIT)
+                    .arg(PAYLOAD_FIELD)
+                    .arg(inner.config.dead_letter_max_len);
+                invocation
+            };
+            promote_all(&mut conn, promote, LIMIT).await;
+        }
+    }
+}
+
+/// Runs a promotion script until it moves fewer than `limit` retries, or fails.
+async fn promote_all<'a>(
+    conn: &mut ConnectionManager,
+    invocation: impl Fn() -> redis::ScriptInvocation<'a>,
+    limit: usize,
+) {
+    loop {
+        match invocation().invoke_async::<usize>(conn).await {
+            Ok(n) if n >= limit => continue,
+            Ok(_) => return,
+            Err(e) => {
+                warn!(error = %e, "failed to promote delayed tasks");
+                return;
             }
         }
     }
@@ -986,7 +1045,8 @@ async fn succeed(
     env: TaskEnvelope,
     output: serde_json::Value,
 ) -> redis::RedisResult<i64> {
-    let keys = &inner.queue.keys;
+    // Finalize in the layout the task was claimed from, so a 0.1 chain stays in the 0.1 layout.
+    let keys = &inner.per_stream[stream].keys;
     let conn = inner.queue.conn.clone();
     let Some(link) = env.chain else {
         return with_retries(conn, |mut conn| async move {
@@ -1133,12 +1193,12 @@ async fn retry_or_dead_raw(
     delay: Duration,
     chain: Option<(&ChainLink, &str)>,
 ) -> redis::RedisResult<i64> {
-    let keys = &inner.queue.keys;
-    let (delayed, dead) = (keys.delayed(), keys.dead());
-    let chain_key = chain.map(|(link, _)| keys.chain(&link.chain_id));
+    let info = &inner.per_stream[stream];
+    let (delayed, dead) = (&info.delayed, &inner.dead);
+    let chain_key = chain.map(|(link, _)| info.keys.chain(&link.chain_id));
     let delay_ms = delay.as_millis() as u64;
     with_retries(inner.queue.conn.clone(), |mut conn| {
-        let (delayed, dead, payload, chain_key) = (&delayed, &dead, &payload, &chain_key);
+        let (payload, chain_key) = (&payload, &chain_key);
         async move {
             let mut invocation = scripts::RETRY_OR_DEAD.prepare_invoke();
             invocation
