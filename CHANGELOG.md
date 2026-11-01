@@ -41,6 +41,7 @@ include breaking changes.
 - **Stored errors include their causes.** A processor error's `source()` chain is now recorded in `last_error` and the dead letter as `top: cause: root`. A cause whose message already appears in the text is skipped.
 - **`wait_for_chain` backs off.** It polls 10 ms apart at first, doubling to 500 ms, instead of every 25 ms, and no longer sleeps past its timeout.
 - **CI actions are pinned to commit SHAs.**
+- **Performance matches 0.1.** In interleaved A/B runs against 0.1 with Redis snapshots paused, every benchmark was within noise: no-op throughput +0.9%, chain throughput −0.0%, p99 latency near capacity −0.1% to +0.6%, submissions +5.8%. The published results in `perf/` still apply.
 
 ### Fixed
 
