@@ -7,6 +7,11 @@ include breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Idle workers' monitors sleep.** While a worker holds no leases, its monitor thread wakes once a second instead of every probe interval (10 ms by default). Claiming a task wakes it at once, so the first lease renewal is never late. Benchmarks are unchanged.
+- **Test cleanup is synchronous and uses `SCAN`.** Tests no longer leave their namespaces behind in Redis, and neither tests nor benchmarks use `KEYS`.
+
 ## [0.2.0] - 2026-11-01
 
 ### Breaking

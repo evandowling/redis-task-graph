@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use redis::AsyncCommands;
-use redis_task_graph::{DeadLetter, Registry, TaskEnvelope, TaskQueue, Worker};
+use redis_task_graph::{DeadLetter, MIN_LEASE, Registry, TaskEnvelope, TaskQueue, Worker};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc};
 
@@ -464,6 +464,37 @@ async fn heartbeat_keeps_long_task_from_being_reclaimed() {
 
     t.queue.submit("slow", &ctx(1)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(2000)).await;
+    w1.shutdown().await;
+    w2.shutdown().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn idle_worker_renews_the_first_lease_it_takes() {
+    let Some(t) = setup().await else { return };
+    let runs = Arc::new(AtomicUsize::new(0));
+    let reg = |runs: Arc<AtomicUsize>| {
+        let mut reg = Registry::new();
+        reg.register("slow", move |_: Ctx| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                Ok(())
+            }
+        })
+        .unwrap();
+        reg
+    };
+    let spawn = |runs| fast(Worker::builder(t.queue.clone(), reg(runs))).lease(MIN_LEASE).spawn();
+    let w1 = spawn(runs.clone()).await.unwrap();
+    let w2 = spawn(runs.clone()).await.unwrap();
+    // Long enough for both monitors to go idle; the claim must wake them, or the first renewal
+    // comes after the 100 ms lease has expired and the other worker runs the task again.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    t.queue.submit("slow", &ctx(1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     w1.shutdown().await;
     w2.shutdown().await;
     assert_eq!(runs.load(Ordering::SeqCst), 1);

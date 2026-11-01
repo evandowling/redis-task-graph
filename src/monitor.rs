@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,10 @@ const SHARDS: usize = 16;
 /// Most leases renewed by one script call. One call per batch keeps renewal to one round trip
 /// per tick at typical loads, while bounding how long a single script blocks Redis.
 const RENEW_BATCH: usize = 128;
+
+/// Longest the monitor sleeps while the worker holds no leases. Claiming a task wakes it at
+/// once, so this only bounds how stale the lag sample gets while idle.
+const IDLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A lease-table key: the stream's index in [`Monitored`]'s stream list, and the entry id.
 type LeaseKey = (u32, Box<str>);
@@ -54,6 +58,11 @@ pub(crate) struct Monitored {
     /// False after a monitor tick panicked, until a tick completes. While false, leases may not
     /// be renewed, so the worker claims nothing new.
     healthy: AtomicBool,
+    /// True while the monitor sleeps for [`IDLE_INTERVAL`] because no leases are held. A new
+    /// lease then wakes it, so its renewal isn't late.
+    idle: AtomicBool,
+    /// The monitor thread, to wake it from idle.
+    thread: OnceLock<std::thread::Thread>,
 }
 
 /// A claimed entry's lease, as tracked by the monitor.
@@ -77,7 +86,22 @@ impl Monitored {
             leases: std::array::from_fn(|_| Mutex::default()),
             next_shard: AtomicUsize::new(0),
             healthy: AtomicBool::new(true),
+            idle: AtomicBool::new(false),
+            thread: OnceLock::new(),
         })
+    }
+
+    /// Marks the monitor idle unless a lease is held, returning whether it is now idle. The
+    /// flag is set before the lease table is checked, and [`Monitored::hold_lease`] checks the
+    /// flag after inserting, so either this sees the new lease or `hold_lease` sees the flag and
+    /// wakes the monitor.
+    fn enter_idle(&self) -> bool {
+        self.idle.store(true, Ordering::SeqCst);
+        if self.leases.iter().any(|shard| !lock(shard).is_empty()) {
+            self.idle.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
     }
 
     /// Whether the monitor is renewing leases normally.
@@ -122,6 +146,11 @@ impl Monitored {
             liveness: liveness.clone(),
         };
         lock(&self.leases[shard]).insert(key.clone(), entry);
+        if self.idle.load(Ordering::SeqCst)
+            && let Some(thread) = self.thread.get()
+        {
+            thread.unpark();
+        }
         LeaseGuard {
             monitored: self.clone(),
             shard,
@@ -181,12 +210,14 @@ impl Monitor {
                 let stop = stop.clone();
                 move || run(config, weak, runtime, stop)
             })?;
+        let _ = monitored.thread.set(thread.thread().clone());
         Ok(Self { stop, thread })
     }
 
     /// Stops the thread and waits for it to exit.
     pub(crate) fn stop(self) {
         self.stop.store(true, Ordering::Release);
+        self.thread.thread().unpark();
         let _ = self.thread.join();
     }
 }
@@ -209,23 +240,33 @@ fn run(config: MonitorConfig, monitored: Weak<Monitored>, runtime: Handle, stop:
         config.max_concurrency,
     );
     let mut conn: Option<redis::Connection> = None;
+    let mut idle = false;
 
     while !stop.load(Ordering::Acquire) {
-        std::thread::sleep(config.probe_interval);
+        // With no leases to renew, there's nothing to do until a task is claimed, which unparks
+        // this thread.
+        if idle {
+            std::thread::park_timeout(IDLE_INTERVAL);
+        } else {
+            std::thread::sleep(config.probe_interval);
+        }
         // The worker's state is dropped once its runtime and tasks are gone.
         let Some(shared) = monitored.upgrade() else {
             return;
         };
+        shared.idle.store(false, Ordering::SeqCst);
         // A panic must not end the thread: leases would silently stop being renewed while the
         // worker kept claiming tasks. Log it, stop claiming, and try again next tick.
         let ticked = std::panic::catch_unwind(AssertUnwindSafe(|| {
             tick(&config, &shared, &runtime, &probe, &mut probe_sent, &mut controller, &mut conn)
         }));
+        idle = false;
         match ticked {
-            Ok(()) => {
+            Ok(held) => {
                 if !shared.healthy.swap(true, Ordering::AcqRel) {
                     warn!("monitor recovered; claiming tasks again");
                 }
+                idle = !held && shared.enter_idle();
             }
             Err(panic) => {
                 // The connection may be partway through a reply; start again with a fresh one.
@@ -249,7 +290,8 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
-/// One sample: measures scheduling lag, adapts the limit to it and renews due leases.
+/// One sample: measures scheduling lag, adapts the limit to it and renews due leases. Returns
+/// whether any lease was held.
 fn tick(
     config: &MonitorConfig,
     shared: &Monitored,
@@ -258,7 +300,7 @@ fn tick(
     probe_sent: &mut Instant,
     controller: &mut Controller,
     conn: &mut Option<redis::Connection>,
-) {
+) -> bool {
     let now = Instant::now();
 
     // Scheduling lag is the worse of two views of how long ready work waits for a thread:
@@ -284,7 +326,7 @@ fn tick(
         adjust_limit(controller, &shared.limiter, lag, now);
     }
 
-    renew_leases(config, shared, conn, now);
+    renew_leases(config, shared, conn, now)
 }
 
 /// Adapts the concurrency limit to scheduling lag, like TCP congestion control: the limit
@@ -349,11 +391,13 @@ fn renew_leases(
     shared: &Monitored,
     conn: &mut Option<redis::Connection>,
     now: Instant,
-) {
+) -> bool {
     // Collect due leases one shard at a time, so tasks on other shards can start and finish.
     let mut due: Vec<(usize, LeaseKey)> = Vec::new();
+    let mut held = false;
     for (shard, leases) in shared.leases.iter().enumerate() {
         let mut leases = lock(leases);
+        held |= !leases.is_empty();
         for (key, lease) in leases.iter_mut().filter(|(_, l)| l.next_due <= now) {
             lease.next_due = now + lease.period;
             // A processor that uses heartbeats and has gone silent for a whole lease is treated
@@ -405,10 +449,11 @@ fn renew_leases(
                         lease.next_due = now;
                     }
                 }
-                return;
+                return held;
             }
         }
     }
+    held
 }
 
 fn connection<'a>(
