@@ -359,7 +359,15 @@ pub async fn connect(ns: &str) -> TaskQueue {
 pub async fn cleanup(ns: &str) {
     let client = redis::Client::open(REDIS_URL).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-    let keys: Vec<String> = conn.keys(format!("{{{ns}}}:*")).await.unwrap();
+    // SCAN rather than KEYS, which blocks Redis while it walks the whole keyspace.
+    let keys: Vec<String> = {
+        let mut iter = conn.scan_match::<_, String>(format!("{{{ns}}}:*")).await.unwrap();
+        let mut keys = Vec::new();
+        while let Some(key) = iter.next_item().await {
+            keys.push(key.unwrap());
+        }
+        keys
+    };
     for chunk in keys.chunks(1000) {
         let _: () = conn.del(chunk).await.unwrap();
     }

@@ -30,6 +30,7 @@ async fn dead_tasks(queue: &TaskQueue) -> Vec<TaskEnvelope> {
 struct TestQueue {
     queue: TaskQueue,
     conn: redis::aio::MultiplexedConnection,
+    client: redis::Client,
 }
 
 impl TestQueue {
@@ -40,17 +41,22 @@ impl TestQueue {
 
 impl Drop for TestQueue {
     fn drop(&mut self) {
-        // Best-effort cleanup of this test's namespace.
-        let mut conn = self.conn.clone();
+        // Deletes this test's namespace, also when the test panics. A blocking connection, since
+        // a task spawned here may never run once the test's runtime shuts down.
+        let Ok(mut conn) = self.client.get_connection_with_timeout(Duration::from_secs(2)) else {
+            return;
+        };
         // Current keys carry the namespace in a hash tag; 0.1 keys (from migration tests) don't.
-        let ns = self.queue.namespace().to_owned();
-        tokio::spawn(async move {
-            let mut keys: Vec<String> = conn.keys(format!("{{{ns}}}:*")).await.unwrap_or_default();
-            keys.extend(conn.keys::<_, Vec<String>>(format!("{ns}:*")).await.unwrap_or_default());
-            if !keys.is_empty() {
-                let _: redis::RedisResult<()> = conn.del(keys).await;
+        let ns = self.queue.namespace();
+        for pattern in [format!("{{{ns}}}:*"), format!("{ns}:*")] {
+            let keys: Vec<String> = match redis::Commands::scan_match(&mut conn, &pattern) {
+                Ok(keys) => keys.filter_map(Result::ok).collect(),
+                Err(_) => continue,
+            };
+            for chunk in keys.chunks(1000) {
+                let _: redis::RedisResult<()> = redis::Commands::del(&mut conn, chunk);
             }
-        });
+        }
     }
 }
 
@@ -74,8 +80,8 @@ async fn setup() -> Option<TestQueue> {
         }
     };
     let ns = format!("rtg-test-{}", uuid::Uuid::new_v4());
-    let queue = TaskQueue::from_client(client, ns).await.ok()?;
-    Some(TestQueue { queue, conn })
+    let queue = TaskQueue::from_client(client.clone(), ns).await.ok()?;
+    Some(TestQueue { queue, conn, client })
 }
 
 /// Polls `cond` until it is true or `timeout` elapses.
