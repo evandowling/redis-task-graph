@@ -79,6 +79,14 @@ pub struct TaskQueue {
     pub(crate) keys: Arc<Keys>,
 }
 
+impl std::fmt::Debug for TaskQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskQueue")
+            .field("namespace", &self.keys.ns())
+            .finish_non_exhaustive()
+    }
+}
+
 impl TaskQueue {
     /// Connects to Redis at `url`; all keys are prefixed with `namespace`.
     pub async fn connect(url: &str, namespace: impl Into<String>) -> Result<Self> {

@@ -96,6 +96,17 @@ pub struct ChainBuilder<'q, Out> {
     _out: PhantomData<fn() -> Out>,
 }
 
+impl<Out> fmt::Debug for ChainBuilder<'_, Out> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let steps: Vec<&str> = std::iter::once(&self.first).chain(&self.rest).map(String::as_str).collect();
+        f.debug_struct("ChainBuilder")
+            .field("queue", self.queue)
+            .field("steps", &steps)
+            .field("result_ttl", &self.result_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'q, Out> ChainBuilder<'q, Out> {
     pub(crate) fn new<In: Serialize>(queue: &'q TaskQueue, first: String, input: &In) -> Self {
         Self {

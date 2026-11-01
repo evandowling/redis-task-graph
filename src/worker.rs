@@ -195,6 +195,7 @@ pub struct WorkerStats {
 
 /// Builds and starts a background worker that scans for tasks and dispatches them to the
 /// processors in a [`Registry`].
+#[derive(Debug)]
 pub struct Worker {
     queue: TaskQueue,
     registry: Registry,
@@ -401,6 +402,15 @@ pub struct WorkerHandle {
     join: JoinHandle<()>,
     consumer_name: String,
     stats: Weak<Monitored>,
+}
+
+impl std::fmt::Debug for WorkerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerHandle")
+            .field("consumer_name", &self.consumer_name)
+            .field("running", &!self.join.is_finished())
+            .finish_non_exhaustive()
+    }
 }
 
 impl WorkerHandle {

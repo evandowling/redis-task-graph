@@ -24,7 +24,7 @@ include breaking changes.
   is returned by `set_lease` for a type that isn't registered.
 - **Configuration validation:** `WorkerConfig::validate`, called by `Worker::spawn`, rejects unsafe settings with `Error::InvalidConfig`: zero counts or `block`, a `promote_interval` under 10 ms, `min_concurrency` above `concurrency`, `backoff_base` above `backoff_max`, leases shorter than 10 probe intervals, and durations over 30 days.
 - **Eviction-policy warning:** workers log a warning at startup if Redis has a memory limit and a `maxmemory-policy` other than `noeviction`, since eviction silently deletes queued tasks.
-- **`Debug` for `Registry`.**
+- **`Debug` for every public type:** `Registry`, `TaskQueue` (shows the namespace), `ChainBuilder` (its steps), `Worker` and `WorkerHandle`. The crate now warns on `missing_debug_implementations`.
 
 ### Changed
 
