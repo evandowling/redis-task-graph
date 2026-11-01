@@ -20,6 +20,23 @@ pub(crate) enum HandlerError {
     Failed(String),
 }
 
+/// Formats `error` followed by each of its causes, as `top: cause: root`. A cause whose message
+/// already appears in the text so far is skipped, since many errors include their source in
+/// their own message.
+pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 pub(crate) type ErasedHandler = Arc<
     dyn Fn(serde_json::Value, TaskControl) -> BoxFuture<'static, std::result::Result<serde_json::Value, HandlerError>>
         + Send
@@ -134,7 +151,7 @@ impl Registry {
                     .map_err(|e| HandlerError::Fatal(format!("invalid context: {e}")))?;
                 let output = processor(context, control)
                     .await
-                    .map_err(|e| HandlerError::Failed(e.to_string()))?;
+                    .map_err(|e| HandlerError::Failed(error_chain(&*e)))?;
                 serde_json::to_value(output)
                     .map_err(|e| HandlerError::Fatal(format!("invalid output: {e}")))
             })
@@ -218,5 +235,26 @@ mod tests {
             reg.register("t", |_: Ctx| async { Ok(()) }),
             Err(Error::DuplicateProcessor(_))
         ));
+    }
+
+    #[derive(Debug)]
+    struct Wrapped(&'static str, Option<Box<dyn std::error::Error + Send + Sync>>);
+    impl std::fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn error_chain_joins_causes_and_skips_repeats() {
+        let root = Wrapped("connection refused", None);
+        let mid = Wrapped("fetch failed: connection refused", Some(Box::new(root)));
+        let top = Wrapped("sync user", Some(Box::new(mid)));
+        assert_eq!(error_chain(&top), "sync user: fetch failed: connection refused");
     }
 }
