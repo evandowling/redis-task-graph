@@ -364,7 +364,8 @@ impl Worker {
             },
             &monitored,
             tokio::runtime::Handle::current(),
-        );
+        )
+        .map_err(Error::Thread)?;
         let stats = Arc::downgrade(&monitored);
         telemetry::register_worker(&config.consumer_name, stats.clone());
         let inner = Arc::new(Inner {
@@ -503,12 +504,19 @@ impl Inner {
     }
 
     /// Takes one permit, waiting if necessary, then as many more as are free up to `max`.
-    /// Returns `None` if shutdown was signalled while waiting.
+    /// Waits first while the monitor is unhealthy, since claimed tasks' leases might not be
+    /// renewed. Returns `None` if shutdown was signalled while waiting.
     async fn acquire_batch(
         &self,
         max: usize,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Option<Vec<Permit>> {
+        while !self.monitored.healthy() {
+            tokio::select! {
+                _ = tokio::time::sleep(self.config.probe_interval) => {}
+                _ = shutdown.changed() => return None,
+            }
+        }
         let first = tokio::select! {
             p = self.limiter().acquire() => p,
             _ = shutdown.changed() => return None,
@@ -1249,6 +1257,10 @@ async fn retry_or_dead_raw(
 }
 
 /// Runs a finalize call up to three times, since losing it causes a duplicate delivery.
+///
+/// A retry that finds the entry no longer pending (-1) counts as success: most likely the
+/// previous attempt committed and only its reply was lost. Rarely, another worker reclaimed and
+/// finished the entry in between, which this then reports as ours.
 async fn with_retries<F, Fut>(conn: ConnectionManager, f: F) -> redis::RedisResult<i64>
 where
     F: Fn(ConnectionManager) -> Fut,
@@ -1260,6 +1272,7 @@ where
             tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt))).await;
         }
         match f(conn.clone()).await {
+            Ok(-1) if attempt > 0 => return Ok(1),
             Ok(v) => return Ok(v),
             Err(e) => last = Some(e),
         }

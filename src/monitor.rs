@@ -5,13 +5,14 @@
 //! waits for a runtime thread. Even if processors block every runtime thread, leases stay alive.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::control::{CancelReason, Liveness};
 use crate::limiter::Limiter;
@@ -50,6 +51,9 @@ pub(crate) struct Monitored {
     /// Claimed entries whose leases the monitor renews, spread across shards round-robin.
     leases: [LeaseShard; SHARDS],
     next_shard: AtomicUsize,
+    /// False after a monitor tick panicked, until a tick completes. While false, leases may not
+    /// be renewed, so the worker claims nothing new.
+    healthy: AtomicBool,
 }
 
 /// A claimed entry's lease, as tracked by the monitor.
@@ -72,7 +76,13 @@ impl Monitored {
             streams,
             leases: std::array::from_fn(|_| Mutex::default()),
             next_shard: AtomicUsize::new(0),
+            healthy: AtomicBool::new(true),
         })
+    }
+
+    /// Whether the monitor is renewing leases normally.
+    pub(crate) fn healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 
     /// Current limit, in-flight count and latest lag sample.
@@ -158,7 +168,11 @@ pub(crate) struct Monitor {
 }
 
 impl Monitor {
-    pub(crate) fn spawn(config: MonitorConfig, monitored: &Arc<Monitored>, runtime: Handle) -> Self {
+    pub(crate) fn spawn(
+        config: MonitorConfig,
+        monitored: &Arc<Monitored>,
+        runtime: Handle,
+    ) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let weak = Arc::downgrade(monitored);
         let thread = std::thread::Builder::new()
@@ -166,9 +180,8 @@ impl Monitor {
             .spawn({
                 let stop = stop.clone();
                 move || run(config, weak, runtime, stop)
-            })
-            .expect("spawn monitor thread");
-        Self { stop, thread }
+            })?;
+        Ok(Self { stop, thread })
     }
 
     /// Stops the thread and waits for it to exit.
@@ -203,33 +216,75 @@ fn run(config: MonitorConfig, monitored: Weak<Monitored>, runtime: Handle, stop:
         let Some(shared) = monitored.upgrade() else {
             return;
         };
-        let now = Instant::now();
-
-        // Scheduling lag is the worse of two views of how long ready work waits for a thread:
-        // a probe injected from outside, and the processors admitted since the last sample.
-        let start_delay = Duration::from_micros(shared.start_delay_us.swap(0, Ordering::AcqRel));
-        let probe_lag = if probe.pending.load(Ordering::Acquire) {
-            now - probe_sent
-        } else {
-            let lag = Duration::from_micros(probe.last_us.load(Ordering::Acquire));
-            probe.pending.store(true, Ordering::Release);
-            probe_sent = now;
-            let p = probe.clone();
-            runtime.spawn(async move {
-                p.last_us.store(now.elapsed().as_micros() as u64, Ordering::Release);
-                p.pending.store(false, Ordering::Release);
-            });
-            lag
-        };
-        let lag = probe_lag.max(start_delay);
-        shared.lag_us.store(lag.as_micros() as u64, Ordering::Release);
-
-        if config.adaptive {
-            adjust_limit(&mut controller, &shared.limiter, lag, now);
+        // A panic must not end the thread: leases would silently stop being renewed while the
+        // worker kept claiming tasks. Log it, stop claiming, and try again next tick.
+        let ticked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            tick(&config, &shared, &runtime, &probe, &mut probe_sent, &mut controller, &mut conn)
+        }));
+        match ticked {
+            Ok(()) => {
+                if !shared.healthy.swap(true, Ordering::AcqRel) {
+                    warn!("monitor recovered; claiming tasks again");
+                }
+            }
+            Err(panic) => {
+                // The connection may be partway through a reply; start again with a fresh one.
+                conn = None;
+                if shared.healthy.swap(false, Ordering::AcqRel) {
+                    error!(
+                        panic = panic_message(&*panic),
+                        "monitor panicked; leases may not be renewed, so no new tasks are claimed"
+                    );
+                }
+            }
         }
-
-        renew_leases(&config, &shared, &mut conn, now);
     }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
+/// One sample: measures scheduling lag, adapts the limit to it and renews due leases.
+fn tick(
+    config: &MonitorConfig,
+    shared: &Monitored,
+    runtime: &Handle,
+    probe: &Arc<Probe>,
+    probe_sent: &mut Instant,
+    controller: &mut Controller,
+    conn: &mut Option<redis::Connection>,
+) {
+    let now = Instant::now();
+
+    // Scheduling lag is the worse of two views of how long ready work waits for a thread:
+    // a probe injected from outside, and the processors admitted since the last sample.
+    let start_delay = Duration::from_micros(shared.start_delay_us.swap(0, Ordering::AcqRel));
+    let probe_lag = if probe.pending.load(Ordering::Acquire) {
+        now - *probe_sent
+    } else {
+        let lag = Duration::from_micros(probe.last_us.load(Ordering::Acquire));
+        probe.pending.store(true, Ordering::Release);
+        *probe_sent = now;
+        let p = probe.clone();
+        runtime.spawn(async move {
+            p.last_us.store(now.elapsed().as_micros() as u64, Ordering::Release);
+            p.pending.store(false, Ordering::Release);
+        });
+        lag
+    };
+    let lag = probe_lag.max(start_delay);
+    shared.lag_us.store(lag.as_micros() as u64, Ordering::Release);
+
+    if config.adaptive {
+        adjust_limit(controller, &shared.limiter, lag, now);
+    }
+
+    renew_leases(config, shared, conn, now);
 }
 
 /// Adapts the concurrency limit to scheduling lag, like TCP congestion control: the limit

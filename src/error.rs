@@ -25,6 +25,9 @@ pub enum Error {
     #[error("invalid worker configuration: {0}")]
     InvalidConfig(String),
 
+    #[error("failed to start the worker's monitor thread: {0}")]
+    Thread(#[source] std::io::Error),
+
     #[error("invalid namespace `{0}`: it must be non-empty and contain no `{{` or `}}`")]
     InvalidNamespace(String),
 }

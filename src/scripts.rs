@@ -4,28 +4,33 @@
 //! calling consumer still owns it. A worker whose lease was reclaimed therefore cannot ack,
 //! retry or extend an entry that another worker is now processing.
 //!
-//! The promote script derives stream keys from the payload, so these scripts assume a
-//! non-cluster Redis deployment.
+//! Every script except [`LEGACY_PROMOTE`] receives all the keys it touches, so they also run on
+//! Redis Cluster.
 
 use std::sync::LazyLock;
 
 use redis::Script;
 
-const OWNED: &str = r"
-local function owned(stream, group, id, consumer)
-  return #redis.call('XPENDING', stream, group, id, id, 1, consumer) > 0
+/// `lost` returns false if `consumer` owns the entry, 0 if another consumer does, and -1 if the
+/// entry is no longer pending. The second `XPENDING` runs only when the lease was lost.
+const LOST: &str = r"
+local function lost(stream, group, id, consumer)
+  if #redis.call('XPENDING', stream, group, id, id, 1, consumer) > 0 then return false end
+  if #redis.call('XPENDING', stream, group, id, id, 1) > 0 then return 0 end
+  return -1
 end
 ";
 
-fn with_owned(body: &str) -> Script {
-    Script::new(&format!("{OWNED}\n{body}"))
+fn with_lost(body: &str) -> Script {
+    Script::new(&format!("{LOST}\n{body}"))
 }
 
-/// KEYS: stream. ARGV: group, id, consumer. Returns 1 if acked, 0 if the lease was lost.
+/// KEYS: stream. ARGV: group, id, consumer. Returns 1 if acked; otherwise the lease was lost, and
+/// it returns 0 if another consumer owns the entry or -1 if it is no longer pending.
 pub(crate) static ACK: LazyLock<Script> = LazyLock::new(|| {
-    with_owned(
+    with_lost(
         r"
-if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+local l = lost(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) if l then return l end
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
 redis.call('XDEL', KEYS[1], ARGV[2])
 return 1
@@ -34,12 +39,12 @@ return 1
 });
 
 /// KEYS: stream, next_stream, chain. ARGV: group, id, consumer, next_payload, field, next_step.
-/// Completes one chain step and enqueues the next one. Returns 1 on success, 0 if the lease was
-/// lost.
+/// Completes one chain step and enqueues the next one. Returns 1 on success, or 0 or -1 as for
+/// [`ACK`] if the lease was lost.
 pub(crate) static ADVANCE: LazyLock<Script> = LazyLock::new(|| {
-    with_owned(
+    with_lost(
         r"
-if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+local l = lost(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) if l then return l end
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
 redis.call('XDEL', KEYS[1], ARGV[2])
 redis.call('XADD', KEYS[2], '*', ARGV[5], ARGV[4])
@@ -50,12 +55,12 @@ return 1
 });
 
 /// KEYS: stream, chain. ARGV: group, id, consumer, output, ttl_secs.
-/// Completes a chain's final step and records its output. Returns 1 on success, 0 if the lease
-/// was lost.
+/// Completes a chain's final step and records its output. Returns 1 on success, or 0 or -1 as for
+/// [`ACK`] if the lease was lost.
 pub(crate) static COMPLETE: LazyLock<Script> = LazyLock::new(|| {
-    with_owned(
+    with_lost(
         r"
-if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+local l = lost(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) if l then return l end
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
 redis.call('XDEL', KEYS[1], ARGV[2])
 redis.call('HSET', KEYS[2], 'state', 'completed', 'output', ARGV[4])
@@ -69,11 +74,12 @@ return 1
 /// ARGV: group, id, consumer, mode ('retry' | 'dead'), payload, delay_ms, dead_max_len, field,
 /// and for chain steps also step, error, ttl_secs.
 /// Removes the entry and either schedules `payload` for retry or appends it to the dead-letter
-/// stream, marking the chain failed. Returns 1 on success, 0 if the lease was lost.
+/// stream, marking the chain failed. Returns 1 on success, or 0 or -1 as for [`ACK`] if the
+/// lease was lost.
 pub(crate) static RETRY_OR_DEAD: LazyLock<Script> = LazyLock::new(|| {
-    with_owned(
+    with_lost(
         r"
-if not owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+local l = lost(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) if l then return l end
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
 redis.call('XDEL', KEYS[1], ARGV[2])
 if ARGV[4] == 'retry' then
@@ -170,3 +176,39 @@ return #due
 ",
     )
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Finalize scripts tell a lease held by another consumer (0) from an entry that is no
+    /// longer pending (-1). Skipped when Redis isn't reachable.
+    #[test]
+    fn ack_reports_why_the_lease_was_lost() {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
+        let Ok(mut conn) = redis::Client::open(url.as_str())
+            .and_then(|c| c.get_connection_with_timeout(std::time::Duration::from_secs(2)))
+        else {
+            eprintln!("skipping: Redis not reachable at {url}");
+            return;
+        };
+        let stream = format!("{{rtg-test-{}}}:stream:t", uuid::Uuid::new_v4());
+        let _: () = redis::cmd("XGROUP")
+            .arg("CREATE").arg(&stream).arg("g").arg("$").arg("MKSTREAM")
+            .query(&mut conn)
+            .unwrap();
+        let id: String = redis::cmd("XADD").arg(&stream).arg("*").arg("f").arg("v").query(&mut conn).unwrap();
+        let _: redis::Value = redis::cmd("XREADGROUP")
+            .arg("GROUP").arg("g").arg("a").arg("STREAMS").arg(&stream).arg(">")
+            .query(&mut conn)
+            .unwrap();
+        let ack = |conn: &mut redis::Connection, consumer: &str| -> i64 {
+            ACK.key(&stream).arg("g").arg(&id).arg(consumer).invoke(conn).unwrap()
+        };
+
+        assert_eq!(ack(&mut conn, "b"), 0, "owned by another consumer");
+        assert_eq!(ack(&mut conn, "a"), 1, "acked by its owner");
+        assert_eq!(ack(&mut conn, "a"), -1, "no longer pending");
+        let _: () = redis::cmd("DEL").arg(&stream).query(&mut conn).unwrap();
+    }
+}

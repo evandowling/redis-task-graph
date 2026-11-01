@@ -31,12 +31,16 @@ include breaking changes.
 - **Configuration validation:** `WorkerConfig::validate`, called by `Worker::spawn`, rejects unsafe settings with `Error::InvalidConfig`: zero counts or `block`, a `promote_interval` under 10 ms, `min_concurrency` above `concurrency`, `backoff_base` above `backoff_max`, leases shorter than 10 probe intervals, and durations over 30 days.
 - **Eviction-policy warning:** workers log a warning at startup if Redis has a memory limit and a `maxmemory-policy` other than `noeviction`, since eviction silently deletes queued tasks.
 - **`Debug` for every public type:** `Registry`, `TaskQueue` (shows the namespace), `ChainBuilder` (its steps), `Worker` and `WorkerHandle`. The crate now warns on `missing_debug_implementations`.
+- **`Error::Thread`:** `Worker::spawn` returns it when the worker's monitor thread can't be started, instead of panicking.
 
 ### Changed
 
 - **Graceful shutdown removes the worker's consumer** from each stream's group, unless it still owns pending entries. Restarts with random consumer names no longer grow the consumer list.
 - **Lease renewal is batched:** the monitor renews up to 128 due leases per script call instead of one call per lease, so workers holding many long-running tasks with short leases need far fewer round trips.
 - **Sharded lease table:** the table of held leases is split into 16 independently locked shards, and each key takes one allocation instead of two. Tasks starting and finishing contend less, and a renewal scan never locks every task at once.
+- **Stored errors include their causes.** A processor error's `source()` chain is now recorded in `last_error` and the dead letter as `top: cause: root`. A cause whose message already appears in the text is skipped.
+- **`wait_for_chain` backs off.** It polls 10 ms apart at first, doubling to 500 ms, instead of every 25 ms, and no longer sleeps past its timeout.
+- **CI actions are pinned to commit SHAs.**
 
 ### Fixed
 
@@ -51,6 +55,8 @@ include breaking changes.
 - **Unreachable Redis stalled lease renewal.** While Redis was unreachable, lease renewal waited
   out a connection timeout for every due lease in turn. It now stops at the first error and
   retries on the next tick.
+- **A monitor panic stopped lease renewal silently.** If the monitor thread panicked, leases and pushback stopped while the worker kept claiming tasks, which then expired and ran twice. The panic is now caught and logged, the worker claims nothing new until a monitor tick completes, and the monitor carries on.
+- **Finalize retries were miscounted as lost leases.** When a finalize call succeeded but its reply was lost, the retry found the entry gone and counted the task as `lease_lost`. The finalize scripts now return 0 when another consumer owns the entry and -1 when it is no longer pending; a retry that sees -1 counts as success.
 
 ## [0.1.0]
 
