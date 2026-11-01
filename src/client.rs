@@ -199,19 +199,23 @@ impl TaskQueue {
     }
 
     /// Polls a chain's status until it finishes or `timeout` elapses, returning the last status.
+    /// Polls start 10 ms apart and back off to 500 ms, so a long wait costs Redis little.
     pub async fn wait_for_chain<Out: DeserializeOwned>(
         &self,
         chain: &ChainId<Out>,
         timeout: Duration,
     ) -> Result<Option<ChainStatus<Out>>> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(10);
         loop {
             let status = self.chain_status(chain).await?;
             let finished = status.as_ref().is_none_or(ChainStatus::is_finished);
-            if finished || tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if finished || now >= deadline {
                 return Ok(status);
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(interval.min(deadline - now)).await;
+            interval = (interval * 2).min(Duration::from_millis(500));
         }
     }
 
