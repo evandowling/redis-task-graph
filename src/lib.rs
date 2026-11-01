@@ -30,7 +30,7 @@ mod telemetry;
 mod worker;
 
 pub use chain::{ChainBuilder, ChainId, ChainStatus, DEFAULT_RESULT_TTL};
-pub use client::TaskQueue;
+pub use client::{DeadLetter, TaskQueue};
 pub use error::{BoxError, Error, Result};
 pub use heartbeat::Heartbeat;
 pub use registry::Registry;

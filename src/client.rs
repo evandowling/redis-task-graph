@@ -13,6 +13,64 @@ use crate::error::Result;
 use crate::keys::Keys;
 use crate::task::{IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
 
+/// An entry in the dead-letter stream, from [`TaskQueue::dead_letters`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum DeadLetter {
+    /// A task that failed fatally or ran out of attempts.
+    Task(TaskEnvelope),
+    /// An entry whose payload wasn't a valid task, so it was never run.
+    Undecodable {
+        /// The payload as stored, or empty if the entry had none.
+        payload: String,
+        /// Why it couldn't be decoded.
+        error: String,
+    },
+}
+
+impl DeadLetter {
+    /// The task, unless the entry couldn't be decoded.
+    pub fn task(&self) -> Option<&TaskEnvelope> {
+        match self {
+            Self::Task(task) => Some(task),
+            Self::Undecodable { .. } => None,
+        }
+    }
+
+    /// Consumes the dead letter and returns its task, unless the entry couldn't be decoded.
+    pub fn into_task(self) -> Option<TaskEnvelope> {
+        match self {
+            Self::Task(task) => Some(task),
+            Self::Undecodable { .. } => None,
+        }
+    }
+
+    /// Workers store an undecodable entry as `{"raw": <payload>, "last_error": <why>}`; retries
+    /// whose payload can't be routed are stored as they were.
+    fn decode(payload: Option<String>) -> Self {
+        let Some(payload) = payload else {
+            return Self::Undecodable {
+                payload: String::new(),
+                error: format!("entry has no `{PAYLOAD_FIELD}` field"),
+            };
+        };
+        match serde_json::from_str::<TaskEnvelope>(&payload) {
+            Ok(task) => Self::Task(task),
+            Err(e) => {
+                #[derive(serde::Deserialize)]
+                struct Raw {
+                    raw: String,
+                    last_error: String,
+                }
+                match serde_json::from_str::<Raw>(&payload) {
+                    Ok(raw) => Self::Undecodable { payload: raw.raw, error: raw.last_error },
+                    Err(_) => Self::Undecodable { payload, error: format!("invalid task payload: {e}") },
+                }
+            }
+        }
+    }
+}
+
 /// Handle to a namespaced task queue in Redis. Cheap to clone.
 #[derive(Clone)]
 pub struct TaskQueue {
@@ -141,16 +199,16 @@ impl TaskQueue {
         }
     }
 
-    /// Returns up to `count` dead-lettered tasks, oldest first.
-    pub async fn dead_letters(&self, count: usize) -> Result<Vec<TaskEnvelope>> {
+    /// Returns up to `count` dead letters, oldest first. Entries that can't be decoded as tasks
+    /// are returned as [`DeadLetter::Undecodable`] rather than failing the whole call.
+    pub async fn dead_letters(&self, count: usize) -> Result<Vec<DeadLetter>> {
         let mut conn = self.conn.clone();
         let reply: StreamRangeReply = conn.xrange_count(self.keys.dead(), "-", "+", count).await?;
-        reply
+        Ok(reply
             .ids
             .iter()
-            .filter_map(|entry| entry.get::<String>(PAYLOAD_FIELD))
-            .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
-            .collect()
+            .map(|entry| DeadLetter::decode(entry.get::<String>(PAYLOAD_FIELD)))
+            .collect())
     }
 
     /// Opens a dedicated connection for blocking reads, so they don't stall the shared one.

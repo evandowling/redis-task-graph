@@ -7,6 +7,10 @@ include breaking changes.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`TaskQueue::dead_letters` returns `Vec<DeadLetter>`.** `DeadLetter::Task` holds the task; `DeadLetter::Undecodable { payload, error }` holds an entry that was never a valid task. Previously one such entry made the whole call fail, and entries with no payload field were silently skipped. Use `DeadLetter::task()` or `into_task()` to get the envelope.
+
 ### Added
 
 - **Processor heartbeats:** processors registered with `Registry::register_with_heartbeat` receive a

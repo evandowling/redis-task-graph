@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use redis::AsyncCommands;
-use redis_task_graph::{Registry, TaskQueue, Worker};
+use redis_task_graph::{DeadLetter, Registry, TaskEnvelope, TaskQueue, Worker};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc};
 
@@ -19,6 +19,12 @@ struct Ctx {
 
 fn ctx(n: u32) -> Ctx {
     Ctx { n, label: format!("task-{n}") }
+}
+
+/// The dead-lettered tasks, failing the test if any entry couldn't be decoded.
+async fn dead_tasks(queue: &TaskQueue) -> Vec<TaskEnvelope> {
+    let letters = queue.dead_letters(10).await.unwrap();
+    letters.into_iter().map(|l| l.into_task().expect("a decodable task")).collect()
 }
 
 struct TestQueue {
@@ -229,7 +235,7 @@ async fn failing_task_is_retried_then_dead_lettered() {
     );
     worker.shutdown().await;
 
-    let dead = t.queue.dead_letters(10).await.unwrap();
+    let dead = dead_tasks(&t.queue).await;
     assert_eq!(dead.len(), 1);
     assert_eq!(dead[0].id, id);
     assert_eq!(dead[0].attempt, 3);
@@ -296,7 +302,7 @@ async fn panic_counts_as_failure_and_worker_survives() {
         })
         .await
     );
-    let dead = t.queue.dead_letters(10).await.unwrap();
+    let dead = dead_tasks(&t.queue).await;
     assert!(dead[0].last_error.as_deref().unwrap().contains("kaboom"));
 
     t.queue.submit("fine", &ctx(2)).await.unwrap();
@@ -332,10 +338,38 @@ async fn undecodable_context_is_dead_lettered_without_retry() {
         .await
     );
     worker.shutdown().await;
-    let dead = t.queue.dead_letters(10).await.unwrap();
+    let dead = dead_tasks(&t.queue).await;
     assert_eq!(dead[0].attempt, 0);
     assert!(dead[0].last_error.as_deref().unwrap().contains("invalid context"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn undecodable_entries_are_listed_alongside_dead_tasks() {
+    let Some(mut t) = setup().await else { return };
+    let mut reg = Registry::new();
+    reg.register("t", |_: Ctx| async { Err::<(), _>("nope".into()) }).unwrap();
+    let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(1).spawn().await.unwrap();
+
+    let id = t.queue.submit("t", &ctx(1)).await.unwrap();
+    let stream = t.queue.stream_key("t");
+    let _: String = t.conn.xadd(&stream, "*", &[("task", "not json")]).await.unwrap();
+    let both = eventually(Duration::from_secs(5), || async {
+        t.queue.dead_letters(10).await.unwrap().len() == 2
+    })
+    .await;
+    worker.shutdown().await;
+    assert!(both, "one undecodable entry must not hide the other dead letters");
+
+    let letters = t.queue.dead_letters(10).await.unwrap();
+    assert!(letters.iter().any(|l| l.task().is_some_and(|task| task.id == id)));
+    let undecodable = letters.iter().find_map(|l| match l {
+        DeadLetter::Undecodable { payload, error } => Some((payload.as_str(), error.as_str())),
+        _ => None,
+    });
+    let (payload, error) = undecodable.expect("the bad entry is listed");
+    assert_eq!(payload, "not json");
+    assert!(error.contains("invalid task payload"), "{error}");
 }
 
 #[tokio::test]
@@ -574,7 +608,7 @@ mod chains {
         assert!(error.contains("invalid digit"), "{error}");
         assert_eq!(formatted.load(Ordering::SeqCst), 0, "later steps never run");
 
-        let dead = t.queue.dead_letters(10).await.unwrap();
+        let dead = dead_tasks(&t.queue).await;
         assert_eq!(dead.len(), 1);
         assert_eq!(dead[0].attempt, 2);
         assert_eq!(dead[0].chain.as_ref().unwrap().chain_id, chain.uuid());
@@ -994,7 +1028,7 @@ mod leases {
         worker.shutdown().await;
         assert!(dead, "the task should be dead-lettered");
         assert_eq!(runs.load(Ordering::SeqCst), 0, "a crash-looping task must not run again");
-        let letters = t.queue.dead_letters(10).await.unwrap();
+        let letters = dead_tasks(&t.queue).await;
         assert_eq!(letters[0].id, id);
         assert!(letters[0].last_error.as_deref().unwrap().contains("delivered 4 times"));
         assert_eq!(t.xlen("poison").await, 0);

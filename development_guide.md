@@ -336,7 +336,8 @@ Controller unit tests are at the bottom of `monitor.rs`. The integration test `b
 - **Promotion:** `promote_loop` runs `PROMOTE` every `promote_interval`, moving up to 100 due members per call. It loops while a call moves all 100. Every worker in a namespace runs this loop. Running it more than once is harmless because the script is atomic: a member is moved once.
 - **Dead letters:** `XADD {ns}:dead MAXLEN ~ dead_letter_max_len`.
   - Undecodable entries are stored as `{"raw": <payload>, "last_error": …}` rather than as a `TaskEnvelope`.
-  - `dead_letters()` currently `collect()`s into a `Result`, so one such entry makes the whole call fail (section 18).
+  - Retries whose payload `PROMOTE` can't route are dead-lettered verbatim.
+  - `dead_letters()` returns `DeadLetter::Task` for valid envelopes and `DeadLetter::Undecodable { payload, error }` for both kinds of bad entry (unwrapping `{raw, last_error}`), and for entries with no payload field. One bad entry never fails the call.
 - **Error classes** (`registry.rs`, `HandlerError`):
 
   | Class | Causes | Handling |
@@ -451,7 +452,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count, with `--features otel`, is 54: 26 integration tests, 24 unit tests, 1 telemetry test and 3 doctests.
+The current count, with `--features otel`, is 55: 27 integration tests, 24 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 
@@ -526,7 +527,6 @@ git worktree remove ../rtg-baseline
 ## 18. Known gaps and next steps
 
 - **Fan-out and fan-in.** Chains are linear. A DAG layer would extend `ChainLink`, or replace it with a graph id plus a join counter in the status hash, decremented atomically by a script.
-- **`dead_letters()` and raw entries.** Undecodable entries are stored as `{raw, last_error}`, and one such entry makes `dead_letters()` return an error. It should skip them or return them in a separate variant.
 - **Consumer cleanup.** Consumers are never removed from the group (`XGROUP DELCONSUMER`). Random default names make the list grow across restarts.
 - **Abort on lease loss.** When a renewal finds another consumer owns the entry, the original processor keeps running until it finishes, and its outcome is then rejected. Signalling the task's `Liveness` would let the worker abort it right away, reducing duplicate side effects.
 - **Redis Cluster.** Needs hash-tagged keys and a `PROMOTE` that receives its keys rather than deriving them.

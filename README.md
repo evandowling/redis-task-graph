@@ -297,11 +297,19 @@ How chains work:
 To inspect failures:
 
 ```rust
-for task in queue.dead_letters(100).await? {
-    println!("{} ({}): attempt {} failed: {:?}",
-        task.id, task.processor_type, task.attempt, task.last_error);
+use redis_task_graph::DeadLetter;
+
+for letter in queue.dead_letters(100).await? {
+    match letter {
+        DeadLetter::Task(task) => println!("{} ({}): attempt {} failed: {:?}",
+            task.id, task.processor_type, task.attempt, task.last_error),
+        DeadLetter::Undecodable { payload, error } => println!("unreadable entry: {error}: {payload}"),
+        _ => {}
+    }
 }
 ```
+
+Entries that were never valid tasks, for example written by something other than this library, come back as `DeadLetter::Undecodable` with their raw payload. `DeadLetter` is `#[non_exhaustive]`, hence the catch-all arm.
 
 The dead-letter stream (`<namespace>:dead`) is capped at about `dead_letter_max_len` entries (100,000 by default), dropping the oldest. To replay a dead letter, submit its `context` again.
 
