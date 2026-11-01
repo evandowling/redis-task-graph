@@ -8,6 +8,10 @@
 #   cargo and harness arguments for the candidate only, e.g. "--features otel" and "--otel".
 #   e.g. git worktree add ../rtg-baseline HEAD
 #        perf/ab.sh ../rtg-baseline /tmp/ab consume_throughput submit_throughput
+#
+# Redis RDB snapshots are paused for the run and restored on exit: a background save every
+# minute lands in a random round and can fake a p99 regression. Set REDIS_CLI to the CLI to use
+# (default: redis-cli, then Memurai's); without one, the run goes ahead with a warning.
 set -euo pipefail
 
 baseline=$(cd "$1" && pwd)
@@ -15,6 +19,18 @@ work=$2
 shift 2
 candidate=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$work"
+
+cli=${REDIS_CLI:-$(command -v redis-cli || command -v memurai-cli || true)}
+[ -z "$cli" ] && [ -x "/c/Program Files/Memurai/memurai-cli.exe" ] && cli="/c/Program Files/Memurai/memurai-cli.exe"
+if [ -n "$cli" ] && saved=$("$cli" CONFIG GET save 2>/dev/null | tail -n 1); then
+    trap '"$cli" CONFIG SET save "$saved" >/dev/null && echo "== restored Redis save: \"$saved\""' EXIT
+    "$cli" CONFIG SET save "" >/dev/null
+    forks() { "$cli" INFO stats | tr -d '\r' | sed -n 's/^total_forks://p'; }
+    forks_before=$(forks)
+    echo "== paused Redis snapshots (was: \"$saved\")"
+else
+    echo "warning: no Redis CLI found (set REDIS_CLI); snapshots may add latency spikes" >&2
+fi
 
 run() { # <side> <checkout> <round> <scenario>
     local cargo_args="" run_args=""
@@ -34,6 +50,10 @@ for scenario in "$@"; do
     run base "$baseline" $((2 * k)) "$scenario"
   done
 done
+
+if [ -n "${forks_before:-}" ] && [ "$(forks)" != "$forks_before" ]; then
+    echo "warning: Redis forked during the run (a save or AOF rewrite); results may be noisy" >&2
+fi
 
 cd "$candidate"
 cargo bench -q --bench load -- --merge-median "$work/base/median" "$work"/base/r[0-9]*
