@@ -45,12 +45,12 @@ Add the crate from crates.io, plus serde and Tokio:
 
 ```toml
 [dependencies]
-redis-task-graph = "0.1"
+redis-task-graph = "0.2"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-To record metrics, enable the `otel` feature: `redis-task-graph = { version = "0.1", features = ["otel"] }`.
+To record metrics, enable the `otel` feature: `redis-task-graph = { version = "0.2", features = ["otel"] }`.
 
 ## Quick start
 

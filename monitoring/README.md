@@ -34,7 +34,7 @@ refused IPv6 (`::1`) connection costs about 2 seconds before the client falls ba
 
 ## Instrumenting your own application
 
-1. Enable the feature: `redis-task-graph = { version = "0.1", features = ["otel"] }`.
+1. Enable the feature: `redis-task-graph = { version = "0.2", features = ["otel"] }`.
 2. Install an OpenTelemetry meter provider at startup. The library records through the global
    meter and never installs an exporter itself. Without a provider, recording is a no-op.
 

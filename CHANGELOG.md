@@ -7,6 +7,8 @@ include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
 ### Breaking
 
 - **New key layout.** Every key now starts with the namespace in a hash tag (`{app}:stream:email` instead of `app:stream:email`), and each processor type has its own retry set (`{app}:delayed:email`). Every script now receives all the keys it touches, so the layout is ready for Redis Cluster. 0.2 workers drain 0.1 streams and retries, and `dead_letters()` and `chain_status` read 0.1 data too; see "Upgrading from 0.1" in the README.
@@ -59,7 +61,7 @@ include breaking changes.
 - **A monitor panic stopped lease renewal silently.** If the monitor thread panicked, leases and pushback stopped while the worker kept claiming tasks, which then expired and ran twice. The panic is now caught and logged, the worker claims nothing new until a monitor tick completes, and the monitor carries on.
 - **Finalize retries were miscounted as lost leases.** When a finalize call succeeded but its reply was lost, the retry found the entry gone and counted the task as `lease_lost`. The finalize scripts now return 0 when another consumer owns the entry and -1 when it is no longer pending; a retry that sees -1 counts as success.
 
-## [0.1.0]
+## [0.1.0] - 2026-10-31
 
 First release.
 
