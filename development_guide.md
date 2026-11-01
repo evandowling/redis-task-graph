@@ -42,7 +42,7 @@ For the public API and usage, read [`README.md`](README.md) first. Measured numb
 | `src/worker.rs` | `Worker`, `WorkerConfig`, `WorkerHandle`, and the worker's async loops (fetch, reclaim, promote, queue sampling) |
 | `src/limiter.rs` | Fair, resizable concurrency limiter on top of `tokio::sync::Semaphore` |
 | `src/monitor.rs` | Per-worker OS thread: lag measurement, pushback `Controller`, lease renewal |
-| `src/heartbeat.rs` | `Heartbeat` (processor beats) and `Liveness`, the per-task state the monitor checks before renewing |
+| `src/control.rs` | `TaskControl` (processor beats and cancellation), `CancelReason`, and `Liveness`, the per-task state the monitor checks before renewing |
 | `src/scripts.rs` | Every Lua script (`ACK`, `ADVANCE`, `COMPLETE`, `RETRY_OR_DEAD`, `HEARTBEAT`, `PROMOTE`) |
 | `src/keys.rs` | Redis key naming |
 | `src/telemetry.rs` | OpenTelemetry instruments behind the `otel` feature, with no-op stubs otherwise |
@@ -228,16 +228,17 @@ Scripts are `LazyLock<redis::Script>` and are invoked with `EVALSHA`. The redis 
 
 **Why a separate OS thread.** Heartbeats originally ran as async tasks on the worker's runtime. Processors that computed or blocked on every runtime thread starved the heartbeats. Leases then expired mid-task, and 22–39% of tasks ran twice in the `lease_starvation` scenario. The monitor thread uses its own **synchronous** `redis::Connection`, with 1 s connect, read and write timeouts. It needs no runtime thread, so leases survive a fully blocked runtime. The `leases_survive_processors_that_block_every_runtime_thread` test proves it: it uses a separate worker runtime plus a thief that runs `XAUTOCLAIM`.
 
-**Two kinds of heartbeat.** *Renewals* are the monitor's `HEARTBEAT` script calls, which reset an entry's PEL idle time in Redis. *Processor beats* are `Heartbeat::beat()` calls from user code (`src/heartbeat.rs`), which only store a timestamp in memory. The monitor decides from the beats whether to keep renewing.
+**Two kinds of heartbeat.** *Renewals* are the monitor's `HEARTBEAT` script calls, which reset an entry's PEL idle time in Redis. *Processor beats* are `TaskControl::beat()` calls from user code (`src/control.rs`), which only store a timestamp in memory. The monitor decides from the beats whether to keep renewing.
 
 **Lease length.** Each stream has a lease: its processor type's `Registry::set_lease`, or the worker's `lease`. `Worker::spawn` resolves the per-stream leases once into `Inner::per_stream`, and rejects any shorter than `MIN_LEASE` (100 ms) or 10 probe intervals, or longer than 30 days, with `Error::InvalidConfig`. Ten probe intervals leave room for three renewal attempts per lease, since renewals are due every third of a lease and checked once per probe. The reclaim loop uses the stream's lease as its `XAUTOCLAIM` min-idle time. Every lease-table entry carries its own lease and renewal period.
 
 **Lease table.**
 - **Structure:** 16 shards (`SHARDS`), each a `Mutex<HashMap<(stream index, entry id), Lease>>`. The stream index is the stream's position in the worker's sorted stream list (`StreamInfo::index`), which `Monitored` keeps for building renewals, so a key costs one allocation (the `Box<str>` id). `hold_lease` assigns shards round-robin with an atomic counter, and the `LeaseGuard` remembers its shard. A `Lease` holds `next_due`, `period = max(lease/3, 10 ms)`, `lease`, and an `Arc<Liveness>`.
-- **Liveness:** shared by the entry, the worker's `process`, and the processor's `Heartbeat`. It holds:
+- **Liveness:** shared by the entry, the worker's `process`, and the processor's `TaskControl`. It holds:
   - a `running` flag, set only while the processor runs;
   - `last_beat_us`, where 0 means the processor has never beaten;
   - the processor task's `AbortHandle`, set when it starts.
+  - a cancel code (0 until cancelled; the first `CancelReason` wins) and a `Notify` that wakes `TaskControl::cancelled()`.
 - **Insertion:** `hold_lease` inserts the entry at claim time and returns a `LeaseGuard`, which removes it on drop and exposes the `Liveness`.
 - **Scan:** each tick, `renew_leases` locks one shard at a time, takes its due entries and bumps their `next_due`. Tasks on the other shards can start and finish meanwhile. For each one:
   - **Hung:** if `silence() >= lease`, meaning the processor is running, has beaten before, and has been silent for a whole lease, the entry is *not* renewed, and the monitor aborts the processor through its `AbortHandle`.
@@ -246,8 +247,14 @@ Scripts are `LazyLock<redis::Script>` and are invoked with `EVALSHA`. The redis 
   The queued keys are then renewed in batches of up to `RENEW_BATCH` (128): one `HEARTBEAT` script call per batch, with each entry's stream in `KEYS` and its id in `ARGV`, returning one status per entry.
 - **Status 1:** the lease was renewed, so nothing to do.
 - **Status -1:** the entry was acked between scheduling and sending. The lease is removed quietly.
-- **Status 0:** someone else owns the entry. The worker logs a warning, increments `rtg.leases.lost`, and removes the lease.
+- **Status 0:** someone else owns the entry. The worker logs a warning, increments `rtg.leases.lost`, and removes the lease, and cancels the task with `CancelReason::LeaseLost`.
 - **Error:** the monitor drops the connection, which is reopened on the next use. It marks the failed batch and all later ones due again, and ends the round, so an unreachable Redis costs one connection timeout per tick rather than one per batch.
+
+**Cancellation.** `Liveness::cancel` stores the first reason with a compare-exchange and calls `notify_waiters`. `TaskControl::cancelled()` enables its `Notified` future before checking the code, so a cancel between the check and the wait isn't missed. Two sources:
+- **Lease lost:** the renewal round, on status 0 (above).
+- **Shutdown:** once the fetch, reclaim and promote loops have stopped, the supervisor calls `Monitored::cancel_all(Shutdown)`, then waits for in-flight tasks. `process` releases a task that sees `Shutdown` before running, and `run` turns a controlled processor's `Failed` after `Shutdown` into `Outcome::Released`. `finalize` requeues a released task through `RETRY_OR_DEAD` in retry mode with zero delay and no attempt increment, so it's promoted on the next `PROMOTE` by any worker. Failures of processors registered with plain `register` are never treated as releases, since they can't see the cancel.
+
+Cancellation costs nothing per task unless used: the code is one atomic load in `process`, and the `Notify` lives in the existing `Liveness` allocation.
 
 **Aborting hung processors.** `run` spawns the processor, stores its `AbortHandle` in the `Liveness`, and awaits it. When the monitor finds a task stalled:
 1. it aborts the processor from the monitor thread, which works even when the worker's own tasks are starved;
@@ -367,8 +374,9 @@ Controller unit tests are at the bottom of `monitor.rs`. The integration test `b
 | Finalize fails 3 times (Redis down) | Entry stays pending; once the `LeaseGuard` drops, no more heartbeats; reclaimed after `lease` | **Yes** |
 | Heartbeat races ack | `HEARTBEAT` returns -1; lease dropped quietly | No |
 | Processor blocks every runtime thread | Monitor thread keeps renewing; pushback lowers admission | No (verified 0% duplicates) |
-| Heartbeat processor hangs | Aborted after one lease of silence and retried; if the worker is also wedged, the lease expires and another worker retries | No, unless the hung code later resumes side effects that were blocked |
-| Processor without heartbeats hangs | Lease renewed forever; the task holds its permit until the worker restarts | No, but the task never finishes. Use heartbeats to detect this. |
+| Controlled processor hangs after beating | Aborted after one lease of silence and retried; if the worker is also wedged, the lease expires and another worker retries | No, unless the hung code later resumes side effects that were blocked |
+| Processor that never beats hangs | Lease renewed forever; the task holds its permit until the worker restarts | No, but the task never finishes. Use `TaskControl::beat` to detect this. |
+| Lease lost while running | Processor is cancelled with `LeaseLost`; its finalize is rejected | Yes, unless the processor stops on the signal |
 | Task crashes every worker that runs it | Each reclaim counts as an attempt; dead-lettered at `max_attempts` without running | Yes, up to `max_attempts` runs |
 | Producer crashes after `XADD` returns | Task is durable in Redis (subject to Redis persistence settings) | N/A |
 | DIY chain (processor submits next task, then returns) | Crash between submit and ack runs the next step twice; crash before submit loses it | Possible, and also possible loss |
@@ -452,7 +460,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count, with `--features otel`, is 55: 27 integration tests, 24 unit tests, 1 telemetry test and 3 doctests.
+The current count, with `--features otel`, is 58: 29 integration tests, 25 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 
@@ -528,7 +536,7 @@ git worktree remove ../rtg-baseline
 
 - **Fan-out and fan-in.** Chains are linear. A DAG layer would extend `ChainLink`, or replace it with a graph id plus a join counter in the status hash, decremented atomically by a script.
 - **Consumer cleanup.** Consumers are never removed from the group (`XGROUP DELCONSUMER`). Random default names make the list grow across restarts.
-- **Abort on lease loss.** When a renewal finds another consumer owns the entry, the original processor keeps running until it finishes, and its outcome is then rejected. Signalling the task's `Liveness` would let the worker abort it right away, reducing duplicate side effects.
+- **Abort on lease loss.** Lease loss only *signals* the processor (`CancelReason::LeaseLost`). Aborting processors that ignore the signal would cut duplicate side effects further, but could interrupt them mid-operation.
 - **Redis Cluster.** Needs hash-tagged keys and a `PROMOTE` that receives its keys rather than deriving them.
 - **Push-based chain completion.** `wait_for_chain` polls; keyspace notifications or a per-chain stream would remove that.
 

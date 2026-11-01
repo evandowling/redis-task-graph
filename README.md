@@ -215,20 +215,23 @@ Processors run on the Tokio runtime alongside the worker's own Redis I/O, so:
 
 Pushback limits the damage when a processor blocks anyway, but blocking still costs throughput. On a 20 ms wait, blocking caps a worker at runtime threads ÷ 20 ms, about 400 tasks/s with 8 threads. An async wait reached 44,000 tasks/s. See [section 4 of the performance notes](performance_readme.md#4-scaling-cpu-bound-tasks).
 
-### Heartbeats and short leases
+### Heartbeats, cancellation and short leases
 
 By default, a task's lease is renewed for as long as its processor runs. That keeps long tasks safe, but a processor that hangs (a deadlock, or a network call with no timeout) is never noticed.
 
-Processors that should be watched for hangs take a `Heartbeat` and call `beat()` while they make progress:
+Processors registered with `register_with_control` receive a `TaskControl`. They call `beat()` while they make progress, so hangs are detected, and can check `is_cancelled()` or await `cancelled()` to stop early:
 
 ```rust
-use redis_task_graph::Heartbeat;
+use redis_task_graph::TaskControl;
 
 registry
-    .register_with_heartbeat("import_file", |job: Import, hb: Heartbeat| async move {
+    .register_with_control("import_file", |job: Import, control: TaskControl| async move {
         for chunk in job.chunks() {
+            if control.is_cancelled() {
+                return Err("stopped before finishing".into());
+            }
             import(chunk).await?;
-            hb.beat();                 // "still making progress"
+            control.beat();            // "still making progress"
         }
         Ok(())
     })?
@@ -239,8 +242,14 @@ How it works:
 - **Opt-in.** Until a processor's first `beat()`, its lease is renewed as usual, so it can do slow setup first. Processors registered with `register` never beat and keep the default behavior.
 - **Silence means hung.** After its first beat, the lease is renewed only while beats keep coming: at least one per lease. If a processor goes silent for a whole lease, the worker aborts it and records a retryable failure ("processor sent no heartbeat …"). The task then retries with backoff and counts toward `max_attempts`.
 - **Detection time.** A hung processor is aborted between one lease and about 1⅓ leases after its last beat. If the whole worker is stuck, its lease expires anyway, and another worker reclaims the task.
-- **Cheap beats.** `beat()` stores a timestamp. Call it as often as you like, including from a `spawn_blocking` closure: `Heartbeat` is `Clone + Send`.
+- **Cheap beats.** `beat()` stores a timestamp. Call it as often as you like, including from a `spawn_blocking` closure: `TaskControl` is `Clone + Send`.
 - **Abort limits.** Aborting drops the processor's future at its next `.await`. Blocking code inside the processor can't be interrupted; it keeps running until it returns, and its result is discarded.
+
+Cancellation asks a processor to stop; it never forces it. `cancel_reason()` says why:
+- **`CancelReason::LeaseLost`:** another worker took the task over, usually after this worker couldn't reach Redis for most of a lease. This worker's outcome will be rejected, so stopping avoids doing the work twice.
+- **`CancelReason::Shutdown`:** the worker is shutting down. If the processor then returns an error, the task is *released*: requeued at once without using up an attempt, for another worker or the next start. Tasks claimed but not yet started at shutdown are released without running.
+
+To stop at an `.await` rather than between steps, race the work against `control.cancelled()` in `tokio::select!`. Processors registered with `register` can't see cancellation; they run to completion.
 
 `Registry::set_lease` gives one processor type its own lease, overriding the worker's. Short leases detect hung processors and crashed workers sooner, but they leave less margin for a pause in reaching Redis. The minimum is `MIN_LEASE` (100 ms). Every worker that runs a type should set the same lease for it.
 
@@ -287,7 +296,8 @@ How chains work:
 | Processor returned `Err` or panicked, with attempts left | Retried after a backoff delay |
 | Processor failed on its last attempt (`max_attempts`, 5 by default) | Moved to the dead-letter stream |
 | Context couldn't be decoded, or the output couldn't be encoded | Dead-lettered at once, without retrying |
-| A heartbeat processor went silent for a whole lease | Aborted, then retried like a failure |
+| A processor using `TaskControl` went silent for a whole lease after beating | Aborted, then retried like a failure |
+| A processor using `TaskControl` returned `Err` after a shutdown cancellation | Released: requeued at once, without using an attempt |
 | Earlier deliveries never recorded an outcome, because their workers crashed or stalled | Each one counts as a failed attempt. Once they reach `max_attempts`, the task is dead-lettered without running again, so a task that crashes workers can't crash them forever. |
 
 - **Backoff:** the delay before retry *n* is `backoff_base × 2^(n-1)`, capped at `backoff_max` (1 s and 5 min by default). Jitter puts the actual delay at random in the upper half of that value.
@@ -364,7 +374,7 @@ let worker = Worker::builder(queue.clone(), registry)
 `WorkerConfig` is `#[non_exhaustive]`, so it can't be built with a struct literal outside the crate. To build a configuration once and reuse it, start from `WorkerConfig::default()`, assign the fields you need, and pass it with `.config(..)`.
 
 **Shutdown:**
-- `shutdown().await` stops claiming new tasks and waits for the ones in flight to finish.
+- `shutdown().await` stops claiming new tasks, cancels the ones in flight with `CancelReason::Shutdown`, and waits for them to finish. Processors that ignore cancellation run to completion; tasks not yet started are released.
 - Dropping the `WorkerHandle` signals shutdown without waiting.
 - If the process exits without either, its in-flight tasks are reclaimed by other workers after their leases expire.
 

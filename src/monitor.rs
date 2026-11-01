@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tracing::{debug, warn};
 
-use crate::heartbeat::Liveness;
+use crate::control::{CancelReason, Liveness};
 use crate::limiter::Limiter;
 use crate::scripts;
 
@@ -81,6 +81,15 @@ impl Monitored {
             concurrency_limit: self.limiter.limit(),
             in_flight: self.limiter.in_flight(),
             scheduling_lag: Duration::from_micros(self.lag_us.load(Ordering::Acquire)),
+        }
+    }
+
+    /// Asks every task holding a lease to stop.
+    pub(crate) fn cancel_all(&self, reason: CancelReason) {
+        for shard in &self.leases {
+            for lease in lock(shard).values() {
+                lease.liveness.cancel(reason);
+            }
         }
     }
 
@@ -319,13 +328,16 @@ fn renew_leases(
                     if status == 1 {
                         continue;
                     }
+                    let removed = lock(&shared.leases[*shard]).remove(key);
                     // -1: acked between the renewal being scheduled and sent.
                     if status != -1 {
                         let stream = &shared.streams[key.0 as usize];
                         warn!(stream, id = &*key.1, "lease lost; another worker may run this task");
                         crate::telemetry::lease_lost(stream);
+                        if let Some(lease) = removed {
+                            lease.liveness.cancel(CancelReason::LeaseLost);
+                        }
                     }
-                    lock(&shared.leases[*shard]).remove(key);
                 }
             }
             Err(e) => {

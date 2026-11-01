@@ -849,7 +849,7 @@ mod pushback {
 mod leases {
     use super::*;
     use redis::streams::StreamReadReply;
-    use redis_task_graph::{Error, Heartbeat};
+    use redis_task_graph::{CancelReason, Error, TaskControl};
 
     /// Creates the consumer group for `processor_type`'s stream, as a worker would.
     async fn create_group(t: &mut TestQueue, processor_type: &str) -> String {
@@ -889,7 +889,7 @@ mod leases {
         let runs = Arc::new(AtomicUsize::new(0));
         let reg = |runs: Arc<AtomicUsize>| {
             let mut reg = Registry::new();
-            reg.register_with_heartbeat("long", move |_: Ctx, hb: Heartbeat| {
+            reg.register_with_control("long", move |_: Ctx, hb: TaskControl| {
                 let runs = runs.clone();
                 async move {
                     runs.fetch_add(1, Ordering::SeqCst);
@@ -926,13 +926,92 @@ mod leases {
     }
 
     #[tokio::test]
+    async fn shutdown_cancels_processors_and_releases_their_tasks() {
+        let Some(t) = setup().await else { return };
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let mut reg = Registry::new();
+        reg.register_with_control("waits", move |_: Ctx, control: TaskControl| {
+            let started_tx = started_tx.clone();
+            async move {
+                started_tx.send(()).unwrap();
+                let reason = control.cancelled().await;
+                Err::<(), _>(format!("stopped: {reason:?}").into())
+            }
+        })
+        .unwrap();
+        // One attempt only: if the release used it up, the task would be dead-lettered.
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(1).spawn().await.unwrap();
+        t.queue.submit("waits", &ctx(1)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv()).await.unwrap();
+
+        // The processor would wait forever; shutdown returns because it asks it to stop.
+        tokio::time::timeout(Duration::from_secs(5), worker.shutdown()).await.expect("shutdown finished");
+        assert!(t.queue.dead_letters(10).await.unwrap().is_empty(), "a released task isn't a failure");
+
+        // Another worker picks the released task up and runs it.
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut reg = Registry::new();
+        let r = ran.clone();
+        reg.register("waits", move |_: Ctx| {
+            let r = r.clone();
+            async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(1).spawn().await.unwrap();
+        assert!(eventually(Duration::from_secs(5), || async { ran.load(Ordering::SeqCst) == 1 }).await);
+        worker.shutdown().await;
+        assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn processor_is_told_when_its_lease_is_lost() {
+        let Some(mut t) = setup().await else { return };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reg = Registry::new();
+        reg.register_with_control("stolen", move |_: Ctx, control: TaskControl| {
+            let tx = tx.clone();
+            async move {
+                tx.send(None).unwrap();
+                let reason = tokio::time::timeout(Duration::from_secs(5), control.cancelled()).await;
+                tx.send(reason.ok()).unwrap();
+                Ok(())
+            }
+        })
+        .unwrap()
+        .set_lease("stolen", Duration::from_millis(300))
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        t.queue.submit("stolen", &ctx(1)).await.unwrap();
+        let wait = Duration::from_secs(5);
+        assert_eq!(tokio::time::timeout(wait, rx.recv()).await.unwrap(), Some(None), "started");
+
+        // Another consumer takes the entry over while the processor runs.
+        let stream = t.queue.stream_key("stolen");
+        let _: redis::Value = redis::cmd("XAUTOCLAIM")
+            .arg(&stream)
+            .arg(t.queue.group_name())
+            .arg("thief")
+            .arg(0)
+            .arg("0-0")
+            .query_async(&mut t.conn)
+            .await
+            .unwrap();
+        let reason = tokio::time::timeout(wait, rx.recv()).await.unwrap();
+        worker.shutdown().await;
+        assert_eq!(reason, Some(Some(CancelReason::LeaseLost)));
+    }
+
+    #[tokio::test]
     async fn processor_that_stops_beating_is_aborted_and_retried() {
         let Some(mut t) = setup().await else { return };
         let calls = Arc::new(AtomicUsize::new(0));
         let aborted = Arc::new(AtomicBool::new(false));
         let mut reg = Registry::new();
         let (c, a) = (calls.clone(), aborted.clone());
-        reg.register_with_heartbeat("hangs", move |_: Ctx, hb: Heartbeat| {
+        reg.register_with_control("hangs", move |_: Ctx, hb: TaskControl| {
             let (c, a) = (c.clone(), a.clone());
             async move {
                 if c.fetch_add(1, Ordering::SeqCst) == 0 {

@@ -21,7 +21,7 @@
 mod chain;
 mod client;
 mod error;
-mod heartbeat;
+mod control;
 mod keys;
 mod limiter;
 mod monitor;
@@ -34,7 +34,9 @@ mod worker;
 pub use chain::{ChainBuilder, ChainId, ChainStatus, DEFAULT_RESULT_TTL};
 pub use client::{DeadLetter, TaskQueue};
 pub use error::{BoxError, Error, Result};
-pub use heartbeat::Heartbeat;
+#[allow(deprecated)]
+pub use control::Heartbeat;
+pub use control::{CancelReason, TaskControl};
 pub use registry::Registry;
 pub use task::{ChainLink, IntoTaskType, TaskEnvelope, TaskId, TaskType};
 pub use worker::{MIN_LEASE, Worker, WorkerConfig, WorkerHandle, WorkerStats};

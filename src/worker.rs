@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::client::TaskQueue;
 use crate::error::{Error, Result};
-use crate::heartbeat::{Heartbeat, Liveness};
+use crate::control::{CancelReason, Liveness, TaskControl};
 use crate::limiter::{Limiter, Permit};
 use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
 use crate::registry::{HandlerError, Registry};
@@ -382,6 +382,8 @@ impl Worker {
                     error!(error = %e, "worker loop panicked");
                 }
             }
+            // Nothing new is claimed now; ask processors still running to stop.
+            supervisor_inner.monitored.cancel_all(CancelReason::Shutdown);
             supervisor_inner.wait_idle().await;
             // In-flight tasks are done, so no leases remain to renew.
             let _ = tokio::task::spawn_blocking(move || monitor.stop()).await;
@@ -836,6 +838,9 @@ enum Outcome {
     Failed(String),
     /// Not retryable: dead-letter immediately.
     Fatal(String),
+    /// Given back because the worker is shutting down: requeue at once, without using up an
+    /// attempt.
+    Released(String),
 }
 
 /// A claimed stream entry.
@@ -883,6 +888,8 @@ async fn process(
                     "delivered {deliveries} times without an outcome being recorded; workers \
                      crashed or stalled while running it"
                 ))
+            } else if lease.liveness().cancel_reason() == Some(CancelReason::Shutdown) {
+                Outcome::Released("the worker shut down before the task started".into())
             } else {
                 run(&inner, &envelope, &stream, lease.liveness()).await
             };
@@ -927,6 +934,7 @@ fn classify(outcome: &Outcome, env: &TaskEnvelope, max_attempts: u32) -> (Finish
             });
             (Finished::Success, event)
         }
+        Outcome::Released(_) => (Finished::Retry, None),
         Outcome::Failed(_) if env.attempt + 1 < max_attempts => (Finished::Retry, None),
         Outcome::Failed(_) | Outcome::Fatal(_) => (Finished::Dead, failed_chain),
     }
@@ -963,6 +971,10 @@ async fn finalize(
             error!(task = %env.id, error = %err, "task cannot be processed; dead-lettering");
             env.last_error = Some(err);
             retry_or_dead(inner, stream, id, "dead", &env, Duration::ZERO).await
+        }
+        Outcome::Released(reason) => {
+            debug!(task = %env.id, reason, "task released at shutdown; requeueing");
+            retry_or_dead(inner, stream, id, "retry", &env, Duration::ZERO).await
         }
     }
 }
@@ -1049,9 +1061,9 @@ async fn run(inner: &Inner, envelope: &TaskEnvelope, stream: &str, liveness: &Ar
             envelope.processor_type
         ));
     };
-    let heartbeat = Heartbeat::new(liveness.clone());
-    let task = tokio::spawn((processor.handler)(envelope.context.clone(), heartbeat));
-    let joined = if processor.heartbeat {
+    let control = TaskControl::new(liveness.clone());
+    let task = tokio::spawn((processor.handler)(envelope.context.clone(), control));
+    let joined = if processor.controlled {
         // The monitor aborts the task if it stops sending heartbeats.
         liveness.set_abort(task.abort_handle());
         liveness.set_running(true);
@@ -1063,6 +1075,12 @@ async fn run(inner: &Inner, envelope: &TaskEnvelope, stream: &str, liveness: &Ar
     };
     match joined {
         Ok(Ok(output)) => Outcome::Succeeded(output),
+        // A processor that stops because the worker is shutting down gives its task back.
+        Ok(Err(HandlerError::Failed(e)))
+            if processor.controlled && liveness.cancel_reason() == Some(CancelReason::Shutdown) =>
+        {
+            Outcome::Released(e)
+        }
         Ok(Err(HandlerError::Failed(e))) => Outcome::Failed(e),
         Ok(Err(HandlerError::Fatal(e))) => Outcome::Fatal(e),
         Err(join) if join.is_cancelled() => {

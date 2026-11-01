@@ -9,12 +9,14 @@ include breaking changes.
 
 ### Breaking
 
+- **`Heartbeat` is now `TaskControl`, and `register_with_heartbeat` is now `register_with_control`.** The old names remain as deprecated aliases. `TaskControl` adds cancellation: `is_cancelled()`, `cancelled().await` and `cancel_reason()` report `CancelReason::LeaseLost` when another worker takes the task over, and `CancelReason::Shutdown` when the worker shuts down.
+- **Shutdown cancels in-flight tasks.** `WorkerHandle::shutdown` now signals running processors before waiting for them. A controlled processor that returns an error after the signal has its task released: requeued at once without using an attempt. Tasks claimed but not yet started at shutdown are released without running.
 - **`TaskQueue::dead_letters` returns `Vec<DeadLetter>`.** `DeadLetter::Task` holds the task; `DeadLetter::Undecodable { payload, error }` holds an entry that was never a valid task. Previously one such entry made the whole call fail, and entries with no payload field were silently skipped. Use `DeadLetter::task()` or `into_task()` to get the envelope.
 
 ### Added
 
-- **Processor heartbeats:** processors registered with `Registry::register_with_heartbeat` receive a
-  `Heartbeat`. Once a processor beats, its lease is renewed only while beats keep arriving, and a
+- **Processor heartbeats:** processors registered with `Registry::register_with_control` receive a
+  `TaskControl`. Once a processor beats, its lease is renewed only while beats keep arriving, and a
   processor that goes silent for a whole lease is aborted and retried. Processors that never beat
   keep being renewed as before.
 - **Per-type leases:** `Registry::set_lease` overrides the worker's lease for one processor type, so
