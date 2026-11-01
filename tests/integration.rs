@@ -1295,3 +1295,70 @@ mod migration {
         assert!(matches!(err, redis_task_graph::Error::InvalidNamespace(_)), "{err}");
     }
 }
+
+mod consumers {
+    use super::*;
+
+    async fn consumers(t: &mut TestQueue, processor_type: &str) -> Vec<String> {
+        let info: Vec<HashMap<String, redis::Value>> = redis::cmd("XINFO")
+            .arg("CONSUMERS")
+            .arg(t.queue.stream_key(processor_type))
+            .arg(t.queue.group_name())
+            .query_async(&mut t.conn)
+            .await
+            .unwrap();
+        info.iter()
+            .filter_map(|c| c.get("name").and_then(|v| redis::from_redis_value_ref::<String>(v).ok()))
+            .collect()
+    }
+
+    fn noop_registry() -> Registry {
+        let mut reg = Registry::new();
+        reg.register("t", |_: Ctx| async { Ok(()) }).unwrap();
+        reg
+    }
+
+    #[tokio::test]
+    async fn shutdown_removes_the_workers_consumer() {
+        let Some(mut t) = setup().await else { return };
+        let worker = fast(Worker::builder(t.queue.clone(), noop_registry())).consumer_name("leaving").spawn().await.unwrap();
+        t.queue.submit("t", &ctx(1)).await.unwrap();
+        for _ in 0..200 {
+            if t.xlen("t").await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(t.xlen("t").await, 0);
+        assert_eq!(consumers(&mut t, "t").await, vec!["leaving".to_string()]);
+        worker.shutdown().await;
+        assert!(consumers(&mut t, "t").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consumer_with_pending_entries_is_kept() {
+        let Some(mut t) = setup().await else { return };
+        let worker = fast(Worker::builder(t.queue.clone(), noop_registry())).consumer_name("holder").spawn().await.unwrap();
+        // Stop the worker's loops from seeing the entry: claim it as the same consumer by hand,
+        // as if a finalize had failed and left it pending.
+        worker.shutdown().await;
+        t.queue.submit("t", &ctx(1)).await.unwrap();
+        let _: redis::Value = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg(t.queue.group_name())
+            .arg("holder")
+            .arg("COUNT")
+            .arg(1)
+            .arg("STREAMS")
+            .arg(t.queue.stream_key("t"))
+            .arg(">")
+            .query_async(&mut t.conn)
+            .await
+            .unwrap();
+        // A restart under the same name has the entry pending at shutdown (its lease is 30 s, so
+        // it isn't reclaimed meanwhile).
+        let worker = fast(Worker::builder(t.queue.clone(), noop_registry())).consumer_name("holder").spawn().await.unwrap();
+        worker.shutdown().await;
+        assert_eq!(consumers(&mut t, "t").await, vec!["holder".to_string()], "removing it would orphan the entry");
+    }
+}

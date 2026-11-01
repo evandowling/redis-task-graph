@@ -43,7 +43,7 @@ For the public API and usage, read [`README.md`](README.md) first. Measured numb
 | `src/limiter.rs` | Fair, resizable concurrency limiter on top of `tokio::sync::Semaphore` |
 | `src/monitor.rs` | Per-worker OS thread: lag measurement, pushback `Controller`, lease renewal |
 | `src/control.rs` | `TaskControl` (processor beats and cancellation), `CancelReason`, and `Liveness`, the per-task state the monitor checks before renewing |
-| `src/scripts.rs` | Every Lua script (`ACK`, `ADVANCE`, `COMPLETE`, `RETRY_OR_DEAD`, `HEARTBEAT`, `PROMOTE`, `LEGACY_PROMOTE`) |
+| `src/scripts.rs` | Every Lua script (`ACK`, `ADVANCE`, `COMPLETE`, `RETRY_OR_DEAD`, `HEARTBEAT`, `REMOVE_CONSUMER`, `PROMOTE`, `LEGACY_PROMOTE`) |
 | `src/keys.rs` | Redis key naming |
 | `src/telemetry.rs` | OpenTelemetry instruments behind the `otel` feature, with no-op stubs otherwise |
 | `src/error.rs` | `Error`, `Result`, `BoxError` |
@@ -149,8 +149,9 @@ pub struct TaskEnvelope {
 6. Pre-builds a `HashMap<stream, TypeHandle>`, so recording metrics never allocates or takes a global lock.
 7. Spawns the loops and a supervisor. On shutdown, the supervisor:
    1. joins the loops;
-   2. waits for `in_flight` to reach 0;
-   3. stops the monitor thread inside `spawn_blocking`, because thread join is blocking.
+   2. cancels in-flight tasks and waits for `in_flight` to reach 0;
+   3. runs `REMOVE_CONSUMER` on each stream, which deletes this worker's consumer (`XGROUP DELCONSUMER`) only if it has no pending entries, so nothing is orphaned;
+   4. stops the monitor thread inside `spawn_blocking`, because thread join is blocking.
 
 ### The fetch path, step by step
 
@@ -222,6 +223,7 @@ end
 | `HEARTBEAT` | stream | If the entry is pending and owned by us, `XCLAIM … 0 JUSTID` to reset idle time | 1 renewed, 0 owned by someone else, -1 no longer pending |
 | `PROMOTE` | delayed (one type), stream (same type) | Moves up to `limit` due members from the type's sorted set onto its stream, without decoding them | Number moved |
 | `LEGACY_PROMOTE` | 0.1 delayed, dead | The 0.1 promotion: routes each due member to `prefix .. processor_type`; payloads that won't decode go to dead | Number moved |
+| `REMOVE_CONSUMER` | stream | At graceful shutdown: `XGROUP DELCONSUMER` for this worker's consumer, unless `XPENDING` lists entries it still owns | 1 removed, 0 kept |
 
 **Invariant: a worker that lost ownership can never change state.**
 - The finalize scripts return 0 and do nothing. The worker counts that as `lease_lost` and logs it.
@@ -471,7 +473,7 @@ cargo clippy --all-targets --features otel
   - For lease or pushback behavior, run the worker in a **separate runtime** from the test's driver. Otherwise a blocked worker runtime also blocks the assertions.
   - To simulate another worker taking a lease, run `XAUTOCLAIM` directly as a "thief" consumer.
 
-The current count, with `--features otel`, is 62: 31 integration tests, 27 unit tests, 1 telemetry test and 3 doctests.
+The current count, with `--features otel`, is 64: 33 integration tests, 27 unit tests, 1 telemetry test and 3 doctests.
 
 ### Benchmarks
 
@@ -546,7 +548,7 @@ git worktree remove ../rtg-baseline
 ## 18. Known gaps and next steps
 
 - **Fan-out and fan-in.** Chains are linear. A DAG layer would extend `ChainLink`, or replace it with a graph id plus a join counter in the status hash, decremented atomically by a script.
-- **Consumer cleanup.** Consumers are never removed from the group (`XGROUP DELCONSUMER`). Random default names make the list grow across restarts.
+- **Consumer cleanup after crashes.** Graceful shutdown removes the worker's consumer, but a crashed worker's consumer stays in the group. An optional sweep could delete consumers that have been idle for long and own no pending entries.
 - **Abort on lease loss.** Lease loss only *signals* the processor (`CancelReason::LeaseLost`). Aborting processors that ignore the signal would cut duplicate side effects further, but could interrupt them mid-operation.
 - **Redis Cluster.** The key layout and scripts are Cluster-ready (section 3); what remains is connecting through `redis::cluster` and testing against a real Cluster.
 - **Push-based chain completion.** `wait_for_chain` polls; keyspace notifications or a per-chain stream would remove that.

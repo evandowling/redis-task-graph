@@ -545,7 +545,7 @@ For lighter needs, `WorkerHandle::stats()` gives the live concurrency limit, tas
 - **No priorities or per-type rate limits.** A worker reads all its streams with equal weight. Use separate pools to isolate types.
 - **Chain status is polled.** `wait_for_chain` polls every 25 ms; there's no push notification.
 - **Clock-based timing.** Retry due times use the Redis server's clock. The queue-time metric uses the producer's and worker's clocks, so skew between machines shows up in it.
-- **Consumer entries accumulate.** Each worker adds a consumer to the group under its `consumer_name`, and the library doesn't remove them. With random names, the group's consumer list grows over restarts. Fixed names avoid that, but two live workers must never share a name.
+- **Crashed workers leave consumers behind.** A worker removes its consumer from the group on graceful shutdown, unless the consumer still has pending entries. A worker that crashes or is killed leaves its consumer in the group; it's harmless but clutters `XINFO CONSUMERS`. Remove idle ones with no pending entries using `XGROUP DELCONSUMER`.
 
 ## Upgrading from 0.1
 

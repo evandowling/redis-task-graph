@@ -400,6 +400,7 @@ impl Worker {
             // Nothing new is claimed now; ask processors still running to stop.
             supervisor_inner.monitored.cancel_all(CancelReason::Shutdown);
             supervisor_inner.wait_idle().await;
+            remove_consumer(&supervisor_inner).await;
             // In-flight tasks are done, so no leases remain to renew.
             let _ = tokio::task::spawn_blocking(move || monitor.stop()).await;
         });
@@ -578,6 +579,27 @@ async fn create_group(conn: &mut ConnectionManager, stream: &str, group: &str) -
     match res {
         Err(e) if e.code() != Some("BUSYGROUP") => Err(e.into()),
         _ => Ok(()),
+    }
+}
+
+/// Removes this worker's consumer from each stream's group once nothing is in flight, so
+/// restarts with fresh consumer names don't leave stale consumers behind. A stream where the
+/// consumer still has pending entries, because a finalize failed, keeps it, so other workers
+/// can reclaim them.
+async fn remove_consumer(inner: &Inner) {
+    let mut conn = inner.queue.conn.clone();
+    for stream in &inner.streams {
+        let removed: redis::RedisResult<i64> = scripts::REMOVE_CONSUMER
+            .key(stream)
+            .arg(&inner.group)
+            .arg(inner.consumer())
+            .invoke_async(&mut conn)
+            .await;
+        match removed {
+            Ok(1) => {}
+            Ok(_) => debug!(stream, "consumer still has pending entries; leaving it in the group"),
+            Err(e) => debug!(stream, error = %e, "failed to remove consumer from the group"),
+        }
     }
 }
 

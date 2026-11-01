@@ -34,6 +34,7 @@ include breaking changes.
 
 ### Changed
 
+- **Graceful shutdown removes the worker's consumer** from each stream's group, unless it still owns pending entries. Restarts with random consumer names no longer grow the consumer list.
 - **Lease renewal is batched:** the monitor renews up to 128 due leases per script call instead of one call per lease, so workers holding many long-running tasks with short leases need far fewer round trips.
 - **Sharded lease table:** the table of held leases is split into 16 independently locked shards, and each key takes one allocation instead of two. Tasks starting and finishing contend less, and a renewal scan never locks every task at once.
 

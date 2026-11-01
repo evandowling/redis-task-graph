@@ -92,6 +92,18 @@ return 1
     )
 });
 
+/// KEYS: stream. ARGV: group, consumer. Removes the consumer from the group unless it still
+/// has pending entries, which deleting it would orphan. Returns 1 if removed, 0 if not.
+pub(crate) static REMOVE_CONSUMER: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+if #redis.call('XPENDING', KEYS[1], ARGV[1], '-', '+', 1, ARGV[2]) > 0 then return 0 end
+redis.call('XGROUP', 'DELCONSUMER', KEYS[1], ARGV[1], ARGV[2])
+return 1
+",
+    )
+});
+
 /// KEYS: the stream of each entry. ARGV: group, consumer, then the entry ids, in KEYS order.
 /// Resets each entry's idle time if this consumer still owns it. Returns one status per entry:
 /// 1 if the lease was extended, 0 if another consumer now owns the entry, and -1 if the entry
