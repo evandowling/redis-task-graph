@@ -38,7 +38,8 @@ return 1
     )
 });
 
-/// KEYS: stream, next_stream, chain. ARGV: group, id, consumer, next_payload, field, next_step.
+/// KEYS: stream, next_stream, chain. ARGV: group, id, consumer, next_step, then the next step's
+/// fields: header field, header, context field, context.
 /// Completes one chain step and enqueues the next one. Returns 1 on success, or 0 or -1 as for
 /// [`ACK`] if the lease was lost.
 pub(crate) static ADVANCE: LazyLock<Script> = LazyLock::new(|| {
@@ -47,8 +48,8 @@ pub(crate) static ADVANCE: LazyLock<Script> = LazyLock::new(|| {
 local l = lost(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) if l then return l end
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
 redis.call('XDEL', KEYS[1], ARGV[2])
-redis.call('XADD', KEYS[2], '*', ARGV[5], ARGV[4])
-redis.call('HSET', KEYS[3], 'state', 'running', 'step', ARGV[6])
+redis.call('XADD', KEYS[2], '*', ARGV[5], ARGV[6], ARGV[7], ARGV[8])
+redis.call('HSET', KEYS[3], 'state', 'running', 'step', ARGV[4])
 return 1
 ",
     )

@@ -153,6 +153,92 @@ impl ChainLink {
 /// Field name under which the envelope JSON is stored in each stream entry.
 pub(crate) const PAYLOAD_FIELD: &str = "task";
 
+/// Field name under which a stream entry stores the task's context, when the envelope in
+/// [`PAYLOAD_FIELD`] leaves it out.
+pub(crate) const CONTEXT_FIELD: &str = "context";
+
+/// A [`TaskEnvelope`] without its context. Submitting a task, or advancing a chain, writes the
+/// header and the context to separate fields of the stream entry, so a worker can hand the
+/// context to the processor without first scanning it to find where it ends.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TaskHeader {
+    pub id: TaskId,
+    pub processor_type: String,
+    #[serde(default)]
+    pub attempt: u32,
+    pub enqueued_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainLink>,
+}
+
+impl TaskHeader {
+    /// The header of a task that has just been submitted.
+    pub fn new(processor_type: String, chain: Option<ChainLink>) -> Self {
+        Self {
+            id: TaskId::new(),
+            processor_type,
+            attempt: 0,
+            enqueued_at: now_millis(),
+            last_error: None,
+            chain,
+        }
+    }
+}
+
+/// A claimed task. Its context is the JSON text as stored, which the processor decodes.
+#[derive(Debug)]
+pub(crate) struct Task {
+    pub header: TaskHeader,
+    pub context: Box<str>,
+}
+
+impl Task {
+    /// Decodes a stream entry's fields. If the entry has no `context` field, it was written by
+    /// 0.2 or earlier, or promoted from the retry set, and `task` holds the whole envelope.
+    ///
+    /// On failure, returns the error and the entry's text, for the dead-letter stream: an entry
+    /// with both fields gives the two joined by a newline.
+    pub fn decode(task: String, context: Option<String>) -> Result<Self, (serde_json::Error, String)> {
+        let Some(context) = context else {
+            return match serde_json::from_str::<TaskEnvelope>(&task) {
+                Ok(env) => Ok(Self {
+                    header: TaskHeader {
+                        id: env.id,
+                        processor_type: env.processor_type,
+                        attempt: env.attempt,
+                        enqueued_at: env.enqueued_at,
+                        last_error: env.last_error,
+                        chain: env.chain,
+                    },
+                    context: env.context.into(),
+                }),
+                Err(e) => Err((e, task)),
+            };
+        };
+        match serde_json::from_str::<TaskHeader>(&task) {
+            Ok(header) => Ok(Self { header, context: context.into_boxed_str() }),
+            Err(e) => Err((e, format!("{task}\n{context}"))),
+        }
+    }
+
+    /// The whole envelope as one JSON object, as the retry set and dead-letter stream store it.
+    /// The context is copied as-is, so a context that isn't valid JSON makes an invalid
+    /// envelope, which `dead_letters()` reports as undecodable.
+    pub fn to_envelope_json(&self) -> String {
+        let header = serde_json::to_string(&self.header).expect("header serializes");
+        // The header is an object with at least an id, so it ends with `}` and needs a comma.
+        let open = &header[..header.len() - 1];
+        let mut json = String::with_capacity(header.len() + self.context.len() + 12);
+        json.push_str(open);
+        json.push_str(",\"context\":");
+        json.push_str(&self.context);
+        json.push('}');
+        json
+    }
+}
+
 pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -182,6 +268,23 @@ mod tests {
         };
         let json = serde_json::to_string(&env).unwrap();
         assert_eq!(serde_json::from_str::<TaskEnvelope>(&json).unwrap(), env);
+    }
+
+    #[test]
+    fn task_decodes_both_layouts_and_reassembles_the_envelope() {
+        let header = TaskHeader::new("t".into(), None);
+        let context = r#"{"to":"a@b.c"}"#;
+        let split = Task::decode(serde_json::to_string(&header).unwrap(), Some(context.into())).unwrap();
+        assert_eq!((&split.header, &*split.context), (&header, context));
+
+        let combined = split.to_envelope_json();
+        let env: TaskEnvelope = serde_json::from_str(&combined).unwrap();
+        assert_eq!((env.id, env.context.get()), (header.id, context));
+        let task = Task::decode(combined, None).unwrap();
+        assert_eq!((&task.header, &*task.context), (&header, context));
+
+        let (_, raw) = Task::decode("{".into(), Some("[1]".into())).unwrap_err();
+        assert_eq!(raw, "{\n[1]");
     }
 
     #[test]

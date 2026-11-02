@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::client::TaskQueue;
 use crate::error::Result;
-use crate::task::{ChainLink, IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
+use crate::task::{CONTEXT_FIELD, ChainLink, IntoTaskType, PAYLOAD_FIELD, TaskHeader};
 
 /// Default time a finished chain's status and output are kept in Redis.
 pub const DEFAULT_RESULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -104,7 +104,7 @@ impl<Out> ChainStatus<Out> {
 pub struct ChainBuilder<'q, Out> {
     queue: &'q TaskQueue,
     first: String,
-    input: serde_json::Result<Box<serde_json::value::RawValue>>,
+    input: serde_json::Result<String>,
     rest: Vec<String>,
     result_ttl: Duration,
     _out: PhantomData<fn() -> Out>,
@@ -126,7 +126,7 @@ impl<'q, Out> ChainBuilder<'q, Out> {
         Self {
             queue,
             first,
-            input: serde_json::value::to_raw_value(input),
+            input: serde_json::to_string(input),
             rest: Vec::new(),
             result_ttl: DEFAULT_RESULT_TTL,
             _out: PhantomData,
@@ -168,16 +168,9 @@ impl<'q, Out> ChainBuilder<'q, Out> {
             result_ttl_secs: self.result_ttl.as_secs().max(1),
         };
         let total = link.total_steps();
-        let envelope = TaskEnvelope {
-            id: TaskId::new(),
-            processor_type: self.first,
-            context: self.input?,
-            attempt: 0,
-            enqueued_at: now_millis(),
-            last_error: None,
-            chain: Some(link),
-        };
-        let payload = serde_json::to_string(&envelope)?;
+        let context = self.input?;
+        let header = TaskHeader::new(self.first, Some(link));
+        let head = serde_json::to_string(&header)?;
         let keys = &self.queue.keys;
         let mut conn = self.queue.conn.clone();
         let _: () = redis::pipe()
@@ -192,15 +185,15 @@ impl<'q, Out> ChainBuilder<'q, Out> {
             )
             .ignore()
             .xadd(
-                keys.stream(&envelope.processor_type),
+                keys.stream(&header.processor_type),
                 "*",
-                &[(PAYLOAD_FIELD, payload)],
+                &[(PAYLOAD_FIELD, head.as_str()), (CONTEXT_FIELD, context.as_str())],
             )
             .ignore()
             .query_async(&mut conn)
             .await?;
-        crate::telemetry::task_submitted(self.queue.namespace(), &envelope.processor_type);
-        crate::telemetry::chain_submitted(self.queue.namespace(), &envelope.processor_type);
+        crate::telemetry::task_submitted(self.queue.namespace(), &header.processor_type);
+        crate::telemetry::chain_submitted(self.queue.namespace(), &header.processor_type);
         Ok(ChainId::from_uuid(chain_id))
     }
 }

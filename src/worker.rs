@@ -19,7 +19,7 @@ use crate::limiter::{Limiter, Permit};
 use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
 use crate::registry::{HandlerError, Registry};
 use crate::scripts;
-use crate::task::{ChainLink, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
+use crate::task::{CONTEXT_FIELD, ChainLink, PAYLOAD_FIELD, Task, TaskHeader, now_millis};
 use crate::telemetry::{self, ChainEvent, ClaimSource, Finished};
 
 /// Shortest lease a worker accepts. Leases are renewed every third of a lease from a thread that
@@ -943,7 +943,8 @@ async fn promote_all<'a>(
 }
 
 enum Outcome {
-    Succeeded(Box<serde_json::value::RawValue>),
+    /// The output, kept only for chain steps.
+    Succeeded(Option<Box<serde_json::value::RawValue>>),
     Failed(String),
     /// Not retryable: dead-letter immediately.
     Fatal(String),
@@ -977,12 +978,15 @@ async fn process(
         None => inner.limiter().acquire().await,
     };
 
-    let Claim { stream, entry, deliveries } = claim;
+    let Claim { stream, mut entry, deliveries } = claim;
+    // Taken rather than copied: the context may be large.
+    let mut take = |field| entry.map.remove(field).and_then(|v| redis::FromRedisValue::from_redis_value(v).ok());
+    let (payload, context) = (take(PAYLOAD_FIELD).unwrap_or_default(), take(CONTEXT_FIELD));
     let id = &entry.id;
     let metrics = inner.metrics(&stream);
-    let payload: String = entry.get(PAYLOAD_FIELD).unwrap_or_default();
-    let (finalized, report) = match serde_json::from_str::<TaskEnvelope>(&payload) {
-        Ok(mut envelope) => {
+    let (finalized, report) = match Task::decode(payload, context) {
+        Ok(mut task) => {
+            let envelope = &mut task.header;
             // Earlier deliveries of this entry never recorded an outcome: their workers crashed or
             // stalled, possibly because of this task. Count them as failed attempts, so a task
             // that keeps crashing workers is dead-lettered instead of retried forever.
@@ -1000,16 +1004,16 @@ async fn process(
             } else if lease.liveness().cancel_reason() == Some(CancelReason::Shutdown) {
                 Outcome::Released("the worker shut down before the task started".into())
             } else {
-                run(&inner, &envelope, &stream, lease.liveness()).await
+                run(&inner, &task, &stream, lease.liveness()).await
             };
             let run_time = started.elapsed();
-            let report = classify(&outcome, &envelope, inner.config.max_attempts);
+            let report = classify(&outcome, &task.header, inner.config.max_attempts);
             let started = std::time::Instant::now();
-            let finalized = finalize(&inner, &stream, id, envelope, outcome).await;
+            let finalized = finalize(&inner, &stream, id, task, outcome).await;
             metrics.times(queue_time, run_time, started.elapsed());
             (finalized, report)
         }
-        Err(e) => {
+        Err((e, payload)) => {
             error!(stream, id, error = %e, "dead-lettering undecodable entry");
             let err = format!("invalid task payload: {e}");
             let raw = serde_json::json!({ "raw": payload, "last_error": err }).to_string();
@@ -1034,7 +1038,7 @@ async fn process(
 }
 
 /// How a task's outcome will be reported once `finalize` has recorded it.
-fn classify(outcome: &Outcome, env: &TaskEnvelope, max_attempts: u32) -> (Finished, Option<ChainEvent>) {
+fn classify(outcome: &Outcome, env: &TaskHeader, max_attempts: u32) -> (Finished, Option<ChainEvent>) {
     let failed_chain = env.chain.as_ref().map(|_| ChainEvent::Failed);
     match outcome {
         Outcome::Succeeded(_) => {
@@ -1055,11 +1059,12 @@ async fn finalize(
     inner: &Inner,
     stream: &str,
     id: &str,
-    mut env: TaskEnvelope,
+    mut task: Task,
     outcome: Outcome,
 ) -> redis::RedisResult<i64> {
+    let env = &mut task.header;
     match outcome {
-        Outcome::Succeeded(output) => succeed(inner, stream, id, env, output).await,
+        Outcome::Succeeded(output) => succeed(inner, stream, id, task.header, output).await,
         Outcome::Failed(err) => {
             env.attempt += 1;
             env.last_error = Some(err.clone());
@@ -1070,20 +1075,20 @@ async fn finalize(
                     inner.config.backoff_max,
                 );
                 warn!(task = %env.id, attempt = env.attempt, error = %err, "task failed; retrying");
-                retry_or_dead(inner, stream, id, "retry", &env, delay).await
+                retry_or_dead(inner, stream, id, "retry", &task, delay).await
             } else {
                 error!(task = %env.id, attempt = env.attempt, error = %err, "task failed; dead-lettering");
-                retry_or_dead(inner, stream, id, "dead", &env, Duration::ZERO).await
+                retry_or_dead(inner, stream, id, "dead", &task, Duration::ZERO).await
             }
         }
         Outcome::Fatal(err) => {
             error!(task = %env.id, error = %err, "task cannot be processed; dead-lettering");
             env.last_error = Some(err);
-            retry_or_dead(inner, stream, id, "dead", &env, Duration::ZERO).await
+            retry_or_dead(inner, stream, id, "dead", &task, Duration::ZERO).await
         }
         Outcome::Released(reason) => {
             debug!(task = %env.id, reason, "task released at shutdown; requeueing");
-            retry_or_dead(inner, stream, id, "retry", &env, Duration::ZERO).await
+            retry_or_dead(inner, stream, id, "retry", &task, Duration::ZERO).await
         }
     }
 }
@@ -1092,8 +1097,8 @@ async fn succeed(
     inner: &Inner,
     stream: &str,
     id: &str,
-    env: TaskEnvelope,
-    output: Box<serde_json::value::RawValue>,
+    env: TaskHeader,
+    output: Option<Box<serde_json::value::RawValue>>,
 ) -> redis::RedisResult<i64> {
     // Finalize in the layout the task was claimed from, so a 0.1 chain stays in the 0.1 layout.
     let keys = &inner.per_stream[stream].keys;
@@ -1111,6 +1116,7 @@ async fn succeed(
         .await;
     };
     let chain_key = keys.chain(&link.chain_id);
+    let output = output.expect("a chain step's output is kept");
 
     let Some((next_type, rest)) = link.remaining.split_first() else {
         let (chain_key, output) = (&chain_key, output.get());
@@ -1130,22 +1136,17 @@ async fn succeed(
     };
 
     let next_step = link.step + 1;
-    let next = TaskEnvelope {
-        id: TaskId::new(),
-        processor_type: next_type.clone(),
-        context: output,
-        attempt: 0,
-        enqueued_at: now_millis(),
-        last_error: None,
-        chain: Some(ChainLink {
+    let next = TaskHeader::new(
+        next_type.clone(),
+        Some(ChainLink {
             step: next_step,
             remaining: rest.to_vec(),
             ..link.clone()
         }),
-    };
-    let next_payload = serde_json::to_string(&next).expect("envelope serializes");
+    );
+    let next_header = serde_json::to_string(&next).expect("header serializes");
     let next_stream = keys.stream(next_type);
-    let (chain_key, next_stream, next_payload) = (&chain_key, &next_stream, &next_payload);
+    let (chain_key, next_stream, next_header, next_context) = (&chain_key, &next_stream, &next_header, output.get());
     with_retries(conn, |mut conn| async move {
         scripts::ADVANCE
             .key(stream)
@@ -1154,16 +1155,19 @@ async fn succeed(
             .arg(&inner.group)
             .arg(id)
             .arg(inner.consumer())
-            .arg(next_payload)
-            .arg(PAYLOAD_FIELD)
             .arg(next_step)
+            .arg(PAYLOAD_FIELD)
+            .arg(next_header)
+            .arg(CONTEXT_FIELD)
+            .arg(next_context)
             .invoke_async::<i64>(&mut conn)
             .await
     })
     .await
 }
 
-async fn run(inner: &Inner, envelope: &TaskEnvelope, stream: &str, liveness: &Arc<Liveness>) -> Outcome {
+async fn run(inner: &Inner, task: &Task, stream: &str, liveness: &Arc<Liveness>) -> Outcome {
+    let envelope = &task.header;
     let Some(processor) = inner.registry.get(&envelope.processor_type) else {
         return Outcome::Fatal(format!(
             "no processor registered for type `{}`",
@@ -1171,7 +1175,8 @@ async fn run(inner: &Inner, envelope: &TaskEnvelope, stream: &str, liveness: &Ar
         ));
     };
     let control = TaskControl::new(liveness.clone());
-    let task = tokio::spawn((processor.handler)(&envelope.context, control));
+    let keep_output = envelope.chain.is_some();
+    let task = tokio::spawn((processor.handler)(&task.context, control, keep_output));
     let joined = if processor.controlled {
         // The monitor aborts the task if it stops sending heartbeats.
         liveness.set_abort(task.abort_handle());
@@ -1220,10 +1225,11 @@ async fn retry_or_dead(
     stream: &str,
     id: &str,
     mode: &str,
-    env: &TaskEnvelope,
+    task: &Task,
     delay: Duration,
 ) -> redis::RedisResult<i64> {
-    let payload = serde_json::to_string(env).expect("envelope serializes");
+    let payload = task.to_envelope_json();
+    let env = &task.header;
     let chain = env
         .chain
         .as_ref()

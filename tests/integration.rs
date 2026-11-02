@@ -1325,6 +1325,40 @@ mod migration {
         assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
     }
 
+    /// 0.2 stored the context inside the envelope; 0.3 gives it its own field.
+    #[tokio::test]
+    async fn chains_queued_by_0_2_finish_in_the_new_layout() {
+        let Some(mut t) = setup().await else { return };
+        const DOUBLE: TaskType<u32, u32> = TaskType::new("double");
+        let chain = uuid::Uuid::new_v4();
+        let mut env: serde_json::Value = serde_json::from_str(&envelope(2, Some(chain))).unwrap();
+        env["chain"]["remaining"] = serde_json::json!(["double"]);
+        let mut reg = Registry::new();
+        reg.register(OLD, |c: Ctx| async move { Ok(c.n * 10) }).unwrap();
+        reg.register(DOUBLE, |n| async move { Ok(n * 2) }).unwrap();
+        // Creates the group, so the entry added next is delivered.
+        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let _: () = t.conn.hset_multiple(format!("{{{}}}:chain:{chain}", t.queue.namespace()), &[("state", "running"), ("step", "0"), ("total", "2")]).await.unwrap();
+        let _: String = t.conn.xadd(t.queue.stream_key("old"), "*", &[("task", env.to_string())]).await.unwrap();
+
+        let id = ChainId::<u32>::from_uuid(chain);
+        let status = t.queue.wait_for_chain(&id, Duration::from_secs(5)).await.unwrap();
+        worker.shutdown().await;
+        assert_eq!(status, Some(ChainStatus::Completed(40)));
+        assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_stores_the_context_in_its_own_field() {
+        let Some(mut t) = setup().await else { return };
+        t.queue.submit(OLD, &ctx(7)).await.unwrap();
+        let reply: redis::streams::StreamRangeReply = t.conn.xrange_all(t.queue.stream_key("old")).await.unwrap();
+        let entry = &reply.ids[0];
+        assert_eq!(entry.get::<String>("context").as_deref(), Some(serde_json::to_string(&ctx(7)).unwrap().as_str()));
+        let header: serde_json::Value = serde_json::from_str(&entry.get::<String>("task").unwrap()).unwrap();
+        assert_eq!((header["processor_type"].as_str(), header.get("context")), (Some("old"), None));
+    }
+
     #[tokio::test]
     async fn namespaces_with_braces_are_rejected() {
         let client = redis::Client::open(redis_url()).unwrap();

@@ -33,6 +33,7 @@ Related documents:
 - [Deployment and sizing](#deployment-and-sizing)
 - [Monitoring](#monitoring)
 - [Limitations](#limitations)
+- [Upgrading from 0.2](#upgrading-from-02)
 - [Upgrading from 0.1](#upgrading-from-01)
 
 ## Requirements
@@ -112,7 +113,7 @@ cargo run --release --example monitored --features otel -- 10   # 10-minute work
 
 ### Where tasks live
 
-Each processor type has its own Redis stream, `{<namespace>}:stream:<processor type>`. Every key starts with the namespace in braces, a Redis Cluster hash tag that keeps a namespace's keys together, so namespaces can't contain `{` or `}`. Submitting a task appends one entry to that stream. The entry holds the task's id, its JSON-encoded context, its attempt count and its submission time. Submitting needs no worker to be running: tasks wait in Redis until a worker that handles their type starts.
+Each processor type has its own Redis stream, `{<namespace>}:stream:<processor type>`. Every key starts with the namespace in braces, a Redis Cluster hash tag that keeps a namespace's keys together, so namespaces can't contain `{` or `}`. Submitting a task appends one entry to that stream. The entry holds the task's JSON-encoded context in one field, and its id, attempt count and submission time in another. Submitting needs no worker to be running: tasks wait in Redis until a worker that handles their type starts.
 
 All workers in a namespace join one Redis **consumer group**. Redis hands each stream entry to exactly one member of the group. That is how many workers, in one process or many, share the load without coordinating with each other.
 
@@ -543,9 +544,17 @@ For lighter needs, `WorkerHandle::stats()` gives the live concurrency limit, tas
 - **No Redis Cluster connections yet.** The key layout is ready for Cluster (every key a script touches shares the namespace's hash slot), but `TaskQueue` connects with a standalone client. A namespace will always live on one Cluster node; spread load across namespaces.
 - **No fan-out or fan-in yet.** Chains are linear: each step has one input and one output.
 - **No priorities or per-type rate limits.** A worker reads all its streams with equal weight. Use separate pools to isolate types.
-- **Chain status is polled.** `wait_for_chain` polls every 25 ms; there's no push notification.
+- **Chain status is polled.** `wait_for_chain` polls every 10 ms at first, backing off to every 500 ms; there's no push notification.
 - **Clock-based timing.** Retry due times use the Redis server's clock. The queue-time metric uses the producer's and worker's clocks, so skew between machines shows up in it.
 - **Crashed workers leave consumers behind.** A worker removes its consumer from the group on graceful shutdown, unless the consumer still has pending entries. A worker that crashes or is killed leaves its consumer in the group; it's harmless but clutters `XINFO CONSUMERS`. Remove idle ones with no pending entries using `XGROUP DELCONSUMER`.
+
+## Upgrading from 0.2
+
+0.3 stores a task's context in its own field of the stream entry, next to the rest of the envelope, instead of inside it. 0.3 workers read entries in either layout, but 0.2 workers can't read the new one: they would dead-letter such a task without its context. 0.3 workers write the new layout too, whenever they advance a chain. So:
+1. **Replace all workers at once.** Stop every 0.2 worker before starting any 0.3 worker. Tasks submitted in between wait in Redis. 0.2 producers can keep running: 0.3 workers read what they write.
+2. **Then upgrade producers.**
+
+Retries and dead letters keep the 0.2 layout, so `dead_letters()` reads entries written by either version.
 
 ## Upgrading from 0.1
 

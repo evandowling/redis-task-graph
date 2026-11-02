@@ -9,8 +9,14 @@ include breaking changes.
 
 ### Breaking
 
-- **`TaskEnvelope::context` is a `Box<RawValue>`** instead of a `serde_json::Value`. The context stays as JSON text until it is decoded straight into the processor's input type, so it is no longer parsed into a `Value` tree, then cloned, then converted. Decode it yourself with `serde_json::from_str(envelope.context.get())`. `TaskEnvelope` compares contexts by their JSON text. In benchmarks, no-op tasks with 64–512 KB byte-array contexts run 2.5x faster, and `u32` arrays 35–45% faster. Large text contexts on plain tasks are 10–30% slower for now, because the context is scanned once to find its end within the envelope and again to decode it.
+- **`TaskEnvelope::context` is a `Box<RawValue>`** instead of a `serde_json::Value`. The context stays as JSON text until it is decoded straight into the processor's input type, so it is no longer parsed into a `Value` tree, then cloned, then converted. Decode it yourself with `serde_json::from_str(envelope.context.get())`. `TaskEnvelope` compares contexts by their JSON text.
+- **Stream entries store the context in its own field.** `submit`, chain submissions and chain hand-offs write the envelope without its context to the `task` field and the context to a new `context` field, so a worker hands the context to the processor without first scanning it to find its end. 0.3 workers read entries in either layout, but 0.2 workers can't read the new one; see "Upgrading from 0.2" in the README. Retries and dead letters keep the old layout.
 
+Together with the output change below, these make no-op tasks with 64–512 KB contexts 3–3.5x faster for byte arrays and 1.4–1.7x faster for `u32` arrays; chain steps get 1.6–2.3x and up to 1.6x. Text contexts and small contexts are unchanged, except for chain steps with 256 KB and larger text, which are 14–75% faster.
+
+### Changed
+
+- **A plain task's output is no longer serialized.** Only a chain step's output is used, so a processor's output for a plain task is dropped as it is, and an output that can't be serialized no longer fails a plain task.
 - **Idle workers' monitors sleep.** While a worker holds no leases, its monitor thread wakes once a second instead of every probe interval (10 ms by default). Claiming a task wakes it at once, so the first lease renewal is never late. Benchmarks are unchanged.
 - **Every public item is documented**, and every fallible public function has an "Errors" section. The crate now forbids `unsafe` code and warns on `missing_docs` and `clippy::missing_errors_doc`, which CI treats as errors.
 - **Test cleanup is synchronous and uses `SCAN`.** Tests no longer leave their namespaces behind in Redis, and neither tests nor benchmarks use `KEYS`.

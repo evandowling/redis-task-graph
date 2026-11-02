@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use crate::chain::{ChainBuilder, ChainId, ChainStatus, parse_status};
 use crate::error::{Error, Result};
 use crate::keys::{self, Keys};
-use crate::task::{IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskId, now_millis};
+use crate::task::{CONTEXT_FIELD, IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskHeader, TaskId};
 
 /// An entry in the dead-letter stream, from [`TaskQueue::dead_letters`].
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +21,8 @@ pub enum DeadLetter {
     Task(TaskEnvelope),
     /// An entry whose payload wasn't a valid task, so it was never run.
     Undecodable {
-        /// The payload as stored, or empty if the entry had none.
+        /// The payload as stored, or empty if the entry had none. For an entry that stored the
+        /// context in its own field, the envelope and the context joined by a newline.
         payload: String,
         /// Why it couldn't be decoded.
         error: String,
@@ -143,26 +144,19 @@ impl TaskQueue {
         task: impl IntoTaskType<In, Out>,
         context: &In,
     ) -> Result<TaskId> {
-        let envelope = TaskEnvelope {
-            id: TaskId::new(),
-            processor_type: task.into_name(),
-            context: serde_json::value::to_raw_value(context)?,
-            attempt: 0,
-            enqueued_at: now_millis(),
-            last_error: None,
-            chain: None,
-        };
-        let payload = serde_json::to_string(&envelope)?;
+        let header = TaskHeader::new(task.into_name(), None);
+        let context = serde_json::to_string(context)?;
+        let head = serde_json::to_string(&header)?;
         let mut conn = self.conn.clone();
         let _: String = conn
             .xadd(
-                self.keys.stream(&envelope.processor_type),
+                self.keys.stream(&header.processor_type),
                 "*",
-                &[(PAYLOAD_FIELD, payload)],
+                &[(PAYLOAD_FIELD, head.as_str()), (CONTEXT_FIELD, context.as_str())],
             )
             .await?;
-        crate::telemetry::task_submitted(self.namespace(), &envelope.processor_type);
-        Ok(envelope.id)
+        crate::telemetry::task_submitted(self.namespace(), &header.processor_type);
+        Ok(header.id)
     }
 
     /// Starts building a chain whose first step runs `first` with `input`. Add steps with
