@@ -1,0 +1,2 @@
+# Mechanical rustfmt pass; ignore in git blame (git config blame.ignoreRevsFile .git-blame-ignore-revs)
+ee13e3eb210950539957069d2fb6865fe54ed03f # Format the codebase with rustfmt
