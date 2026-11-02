@@ -18,13 +18,19 @@ struct Ctx {
 }
 
 fn ctx(n: u32) -> Ctx {
-    Ctx { n, label: format!("task-{n}") }
+    Ctx {
+        n,
+        label: format!("task-{n}"),
+    }
 }
 
 /// The dead-lettered tasks, failing the test if any entry couldn't be decoded.
 async fn dead_tasks(queue: &TaskQueue) -> Vec<TaskEnvelope> {
     let letters = queue.dead_letters(10).await.unwrap();
-    letters.into_iter().map(|l| l.into_task().expect("a decodable task")).collect()
+    letters
+        .into_iter()
+        .map(|l| l.into_task().expect("a decodable task"))
+        .collect()
 }
 
 struct TestQueue {
@@ -35,7 +41,10 @@ struct TestQueue {
 
 impl TestQueue {
     async fn xlen(&mut self, processor_type: &str) -> usize {
-        self.conn.xlen(self.queue.stream_key(processor_type)).await.unwrap()
+        self.conn
+            .xlen(self.queue.stream_key(processor_type))
+            .await
+            .unwrap()
     }
 }
 
@@ -43,7 +52,10 @@ impl Drop for TestQueue {
     fn drop(&mut self) {
         // Deletes this test's namespace, also when the test panics. A blocking connection, since
         // a task spawned here may never run once the test's runtime shuts down.
-        let Ok(mut conn) = self.client.get_connection_with_timeout(Duration::from_secs(2)) else {
+        let Ok(mut conn) = self
+            .client
+            .get_connection_with_timeout(Duration::from_secs(2))
+        else {
             return;
         };
         // Current keys carry the namespace in a hash tag; 0.1 keys (from migration tests) don't.
@@ -81,7 +93,11 @@ async fn setup() -> Option<TestQueue> {
     };
     let ns = format!("rtg-test-{}", uuid::Uuid::new_v4());
     let queue = TaskQueue::from_client(client.clone(), ns).await.ok()?;
-    Some(TestQueue { queue, conn, client })
+    Some(TestQueue {
+        queue,
+        conn,
+        client,
+    })
 }
 
 /// Polls `cond` until it is true or `timeout` elapses.
@@ -120,14 +136,24 @@ async fn processes_task_with_its_context() {
         }
     })
     .unwrap();
-    let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+    let worker = fast(Worker::builder(t.queue.clone(), reg))
+        .spawn()
+        .await
+        .unwrap();
 
     t.queue.submit("echo", &ctx(7)).await.unwrap();
-    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(got, ctx(7));
 
     worker.shutdown().await;
-    assert_eq!(t.xlen("echo").await, 0, "acked entries are removed from the stream");
+    assert_eq!(
+        t.xlen("echo").await,
+        0,
+        "acked entries are removed from the stream"
+    );
 }
 
 #[tokio::test]
@@ -146,8 +172,16 @@ async fn tasks_submitted_before_worker_starts_are_processed() {
         }
     })
     .unwrap();
-    let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
-    assert!(eventually(Duration::from_secs(5), || async { seen.load(Ordering::SeqCst) == 1 }).await);
+    let worker = fast(Worker::builder(t.queue.clone(), reg))
+        .spawn()
+        .await
+        .unwrap();
+    assert!(
+        eventually(Duration::from_secs(5), || async {
+            seen.load(Ordering::SeqCst) == 1
+        })
+        .await
+    );
     worker.shutdown().await;
 }
 
@@ -208,7 +242,10 @@ async fn processes_each_task_once_in_parallel_across_workers() {
     }
     {
         let counts = counts.lock().unwrap();
-        assert!(counts.values().all(|&c| c == 1), "no task ran twice: {counts:?}");
+        assert!(
+            counts.values().all(|&c| c == 1),
+            "no task ran twice: {counts:?}"
+        );
     }
     assert!(peak.load(Ordering::SeqCst) > 1, "tasks ran concurrently");
     assert_eq!(t.xlen("count").await, 0);
@@ -275,7 +312,12 @@ async fn task_succeeds_after_transient_failures() {
         .unwrap();
 
     t.queue.submit("flaky", &ctx(1)).await.unwrap();
-    assert!(eventually(Duration::from_secs(5), || async { calls.load(Ordering::SeqCst) == 3 }).await);
+    assert!(
+        eventually(Duration::from_secs(5), || async {
+            calls.load(Ordering::SeqCst) == 3
+        })
+        .await
+    );
     tokio::time::sleep(Duration::from_millis(200)).await;
     worker.shutdown().await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -287,7 +329,8 @@ async fn panic_counts_as_failure_and_worker_survives() {
     let Some(t) = setup().await else { return };
     let ok = Arc::new(AtomicUsize::new(0));
     let mut reg = Registry::new();
-    reg.register("boom", |_: Ctx| async { panic!("kaboom") }).unwrap();
+    reg.register("boom", |_: Ctx| async { panic!("kaboom") })
+        .unwrap();
     let o = ok.clone();
     reg.register("fine", move |_: Ctx| {
         let o = o.clone();
@@ -314,7 +357,12 @@ async fn panic_counts_as_failure_and_worker_survives() {
     assert!(dead[0].last_error.as_deref().unwrap().contains("kaboom"));
 
     t.queue.submit("fine", &ctx(2)).await.unwrap();
-    assert!(eventually(Duration::from_secs(5), || async { ok.load(Ordering::SeqCst) == 1 }).await);
+    assert!(
+        eventually(Duration::from_secs(5), || async {
+            ok.load(Ordering::SeqCst) == 1
+        })
+        .await
+    );
     worker.shutdown().await;
 }
 
@@ -338,7 +386,10 @@ async fn undecodable_context_is_dead_lettered_without_retry() {
         .await
         .unwrap();
 
-    t.queue.submit("typed", &serde_json::json!({ "wrong": true })).await.unwrap();
+    t.queue
+        .submit("typed", &serde_json::json!({ "wrong": true }))
+        .await
+        .unwrap();
     assert!(
         eventually(Duration::from_secs(5), || async {
             !t.queue.dead_letters(10).await.unwrap().is_empty()
@@ -348,7 +399,13 @@ async fn undecodable_context_is_dead_lettered_without_retry() {
     worker.shutdown().await;
     let dead = dead_tasks(&t.queue).await;
     assert_eq!(dead[0].attempt, 0);
-    assert!(dead[0].last_error.as_deref().unwrap().contains("invalid context"));
+    assert!(
+        dead[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("invalid context")
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -356,21 +413,37 @@ async fn undecodable_context_is_dead_lettered_without_retry() {
 async fn undecodable_entries_are_listed_alongside_dead_tasks() {
     let Some(mut t) = setup().await else { return };
     let mut reg = Registry::new();
-    reg.register("t", |_: Ctx| async { Err::<(), _>("nope".into()) }).unwrap();
-    let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(1).spawn().await.unwrap();
+    reg.register("t", |_: Ctx| async { Err::<(), _>("nope".into()) })
+        .unwrap();
+    let worker = fast(Worker::builder(t.queue.clone(), reg))
+        .max_attempts(1)
+        .spawn()
+        .await
+        .unwrap();
 
     let id = t.queue.submit("t", &ctx(1)).await.unwrap();
     let stream = t.queue.stream_key("t");
-    let _: String = t.conn.xadd(&stream, "*", &[("task", "not json")]).await.unwrap();
+    let _: String = t
+        .conn
+        .xadd(&stream, "*", &[("task", "not json")])
+        .await
+        .unwrap();
     let both = eventually(Duration::from_secs(5), || async {
         t.queue.dead_letters(10).await.unwrap().len() == 2
     })
     .await;
     worker.shutdown().await;
-    assert!(both, "one undecodable entry must not hide the other dead letters");
+    assert!(
+        both,
+        "one undecodable entry must not hide the other dead letters"
+    );
 
     let letters = t.queue.dead_letters(10).await.unwrap();
-    assert!(letters.iter().any(|l| l.task().is_some_and(|task| task.id == id)));
+    assert!(
+        letters
+            .iter()
+            .any(|l| l.task().is_some_and(|task| task.id == id))
+    );
     let undecodable = letters.iter().find_map(|l| match l {
         DeadLetter::Undecodable { payload, error } => Some((payload.as_str(), error.as_str())),
         _ => None,
@@ -428,7 +501,12 @@ async fn expired_lease_is_reclaimed_by_another_worker() {
         .await
         .unwrap();
 
-    assert!(eventually(Duration::from_secs(5), || async { seen.load(Ordering::SeqCst) == 1 }).await);
+    assert!(
+        eventually(Duration::from_secs(5), || async {
+            seen.load(Ordering::SeqCst) == 1
+        })
+        .await
+    );
     worker.shutdown().await;
     assert_eq!(t.xlen("orphan").await, 0);
 }
@@ -486,7 +564,11 @@ async fn idle_worker_renews_the_first_lease_it_takes() {
         .unwrap();
         reg
     };
-    let spawn = |runs| fast(Worker::builder(t.queue.clone(), reg(runs))).lease(MIN_LEASE).spawn();
+    let spawn = |runs| {
+        fast(Worker::builder(t.queue.clone(), reg(runs)))
+            .lease(MIN_LEASE)
+            .spawn()
+    };
     let w1 = spawn(runs.clone()).await.unwrap();
     let w2 = spawn(runs.clone()).await.unwrap();
     // Long enough for both monitors to go idle; the claim must wake them, or the first renewal
@@ -505,7 +587,10 @@ async fn tasks_for_unregistered_types_are_left_alone() {
     let Some(mut t) = setup().await else { return };
     let mut reg = Registry::new();
     reg.register("known", |_: Ctx| async { Ok(()) }).unwrap();
-    let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+    let worker = fast(Worker::builder(t.queue.clone(), reg))
+        .spawn()
+        .await
+        .unwrap();
 
     t.queue.submit("unknown", &ctx(1)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -530,10 +615,15 @@ async fn shutdown_waits_for_in_flight_tasks() {
         }
     })
     .unwrap();
-    let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+    let worker = fast(Worker::builder(t.queue.clone(), reg))
+        .spawn()
+        .await
+        .unwrap();
 
     t.queue.submit("slow", &ctx(1)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
     worker.shutdown().await;
     assert!(finished.load(Ordering::SeqCst));
     assert_eq!(t.xlen("slow").await, 0);
@@ -557,7 +647,8 @@ mod chains {
     }
 
     fn register_sum(reg: &mut Registry) {
-        reg.register(SUM, |ns| async move { Ok(ns.iter().sum()) }).unwrap();
+        reg.register(SUM, |ns| async move { Ok(ns.iter().sum()) })
+            .unwrap();
     }
 
     fn register_format(reg: &mut Registry) {
@@ -575,7 +666,12 @@ mod chains {
         for register in [register_parse, register_sum, register_format] {
             let mut reg = Registry::new();
             register(&mut reg);
-            workers.push(fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap());
+            workers.push(
+                fast(Worker::builder(t.queue.clone(), reg))
+                    .spawn()
+                    .await
+                    .unwrap(),
+            );
         }
 
         let chain = t
@@ -598,9 +694,17 @@ mod chains {
         let Some(t) = setup().await else { return };
         let mut reg = Registry::new();
         register_parse(&mut reg);
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
-        let chain = t.queue.chain(PARSE, &"4,5".to_string()).submit().await.unwrap();
+        let chain = t
+            .queue
+            .chain(PARSE, &"4,5".to_string())
+            .submit()
+            .await
+            .unwrap();
         let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
         assert_eq!(status, Some(ChainStatus::Completed(vec![4, 5])));
         worker.shutdown().await;
@@ -671,7 +775,10 @@ mod chains {
             }
         })
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
         let chain = t
             .queue
@@ -702,7 +809,10 @@ mod chains {
         })
         .unwrap();
         register_sum(&mut reg);
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
         let chain = t
             .queue
@@ -742,7 +852,10 @@ mod chains {
             }
         })
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
         let chain = t
             .queue
@@ -754,7 +867,10 @@ mod chains {
             .cast::<serde_json::Value>();
         let status = t.queue.wait_for_chain(&chain, WAIT).await.unwrap();
         worker.shutdown().await;
-        assert_eq!(status, Some(ChainStatus::Completed(serde_json::Value::Null)));
+        assert_eq!(
+            status,
+            Some(ChainStatus::Completed(serde_json::Value::Null))
+        );
         assert_eq!(*seen.lock().unwrap(), vec![7, 8]);
     }
 }
@@ -803,7 +919,10 @@ mod pushback {
         };
         flood(0).await;
         assert!(
-            eventually(Duration::from_secs(10), || async { worker.stats().concurrency_limit == 8 }).await,
+            eventually(Duration::from_secs(10), || async {
+                worker.stats().concurrency_limit == 8
+            })
+            .await,
             "slow start reached the maximum: {:?}",
             worker.stats()
         );
@@ -813,16 +932,27 @@ mod pushback {
             t.queue.submit("block", &ctx(n)).await.unwrap();
         }
         assert!(
-            eventually(Duration::from_secs(5), || async { worker.stats().concurrency_limit < 8 }).await,
+            eventually(Duration::from_secs(5), || async {
+                worker.stats().concurrency_limit < 8
+            })
+            .await,
             "pushback lowered the limit: {:?}",
             worker.stats()
         );
-        assert!(eventually(Duration::from_secs(10), || async { runs.load(Ordering::SeqCst) == 16 }).await);
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                runs.load(Ordering::SeqCst) == 16
+            })
+            .await
+        );
 
         // Once the runtime keeps up again, the limit recovers.
         flood(10_000).await;
         assert!(
-            eventually(Duration::from_secs(10), || async { worker.stats().concurrency_limit == 8 }).await,
+            eventually(Duration::from_secs(10), || async {
+                worker.stats().concurrency_limit == 8
+            })
+            .await,
             "limit recovered: {:?}",
             worker.stats()
         );
@@ -863,7 +993,10 @@ mod pushback {
         let (stream, group) = (t.queue.stream_key("block"), t.queue.group_name());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         while runs.load(Ordering::SeqCst) < 3 || t.xlen("block").await > 0 {
-            assert!(tokio::time::Instant::now() < deadline, "tasks did not finish");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "tasks did not finish"
+            );
             let stolen: redis::streams::StreamAutoClaimReply = redis::cmd("XAUTOCLAIM")
                 .arg(&stream)
                 .arg(&group)
@@ -875,7 +1008,10 @@ mod pushback {
                 .query_async(&mut t.conn)
                 .await
                 .unwrap();
-            assert!(stolen.claimed.is_empty(), "a lease lapsed while its task was running");
+            assert!(
+                stolen.claimed.is_empty(),
+                "a lease lapsed while its task was running"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
@@ -906,7 +1042,12 @@ mod leases {
     }
 
     /// Claims up to `count` new entries as `consumer` and never acks them, like a crashed worker.
-    async fn claim_as(t: &mut TestQueue, stream: &str, consumer: &str, count: usize) -> Vec<String> {
+    async fn claim_as(
+        t: &mut TestQueue,
+        stream: &str,
+        consumer: &str,
+        count: usize,
+    ) -> Vec<String> {
         let reply: StreamReadReply = redis::cmd("XREADGROUP")
             .arg("GROUP")
             .arg(t.queue.group_name())
@@ -919,7 +1060,12 @@ mod leases {
             .query_async(&mut t.conn)
             .await
             .unwrap();
-        reply.keys.into_iter().flat_map(|k| k.ids).map(|e| e.id).collect()
+        reply
+            .keys
+            .into_iter()
+            .flat_map(|k| k.ids)
+            .map(|e| e.id)
+            .collect()
     }
 
     #[tokio::test]
@@ -945,14 +1091,24 @@ mod leases {
             reg
         };
         // Two workers, so a lease that expired would be picked up by the other one.
-        let w1 = fast(Worker::builder(t.queue.clone(), reg(runs.clone()))).spawn().await.unwrap();
-        let w2 = fast(Worker::builder(t.queue.clone(), reg(runs.clone()))).spawn().await.unwrap();
+        let w1 = fast(Worker::builder(t.queue.clone(), reg(runs.clone())))
+            .spawn()
+            .await
+            .unwrap();
+        let w2 = fast(Worker::builder(t.queue.clone(), reg(runs.clone())))
+            .spawn()
+            .await
+            .unwrap();
 
         t.queue.submit("long", &ctx(1)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(1800)).await;
         w1.shutdown().await;
         w2.shutdown().await;
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "a beating task keeps its 200 ms lease for 1.2 s");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "a beating task keeps its 200 ms lease for 1.2 s"
+        );
     }
 
     /// Sets a flag when dropped, to show that a future was aborted.
@@ -979,13 +1135,24 @@ mod leases {
         })
         .unwrap();
         // One attempt only: if the release used it up, the task would be dead-lettered.
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(1).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .max_attempts(1)
+            .spawn()
+            .await
+            .unwrap();
         t.queue.submit("waits", &ctx(1)).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), started_rx.recv()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+            .await
+            .unwrap();
 
         // The processor would wait forever; shutdown returns because it asks it to stop.
-        tokio::time::timeout(Duration::from_secs(5), worker.shutdown()).await.expect("shutdown finished");
-        assert!(t.queue.dead_letters(10).await.unwrap().is_empty(), "a released task isn't a failure");
+        tokio::time::timeout(Duration::from_secs(5), worker.shutdown())
+            .await
+            .expect("shutdown finished");
+        assert!(
+            t.queue.dead_letters(10).await.unwrap().is_empty(),
+            "a released task isn't a failure"
+        );
 
         // Another worker picks the released task up and runs it.
         let ran = Arc::new(AtomicUsize::new(0));
@@ -999,8 +1166,17 @@ mod leases {
             }
         })
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(1).spawn().await.unwrap();
-        assert!(eventually(Duration::from_secs(5), || async { ran.load(Ordering::SeqCst) == 1 }).await);
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .max_attempts(1)
+            .spawn()
+            .await
+            .unwrap();
+        assert!(
+            eventually(Duration::from_secs(5), || async {
+                ran.load(Ordering::SeqCst) == 1
+            })
+            .await
+        );
         worker.shutdown().await;
         assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
     }
@@ -1014,7 +1190,8 @@ mod leases {
             let tx = tx.clone();
             async move {
                 tx.send(None).unwrap();
-                let reason = tokio::time::timeout(Duration::from_secs(5), control.cancelled()).await;
+                let reason =
+                    tokio::time::timeout(Duration::from_secs(5), control.cancelled()).await;
                 tx.send(reason.ok()).unwrap();
                 Ok(())
             }
@@ -1022,10 +1199,17 @@ mod leases {
         .unwrap()
         .set_lease("stolen", Duration::from_millis(300))
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
         t.queue.submit("stolen", &ctx(1)).await.unwrap();
         let wait = Duration::from_secs(5);
-        assert_eq!(tokio::time::timeout(wait, rx.recv()).await.unwrap(), Some(None), "started");
+        assert_eq!(
+            tokio::time::timeout(wait, rx.recv()).await.unwrap(),
+            Some(None),
+            "started"
+        );
 
         // Another consumer takes the entry over while the processor runs.
         let stream = t.queue.stream_key("stolen");
@@ -1066,13 +1250,28 @@ mod leases {
         .set_lease("hangs", Duration::from_millis(300))
         .unwrap();
         let started = tokio::time::Instant::now();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
         t.queue.submit("hangs", &ctx(1)).await.unwrap();
-        assert!(eventually(Duration::from_secs(5), || async { calls.load(Ordering::SeqCst) == 2 }).await);
-        assert!(aborted.load(Ordering::SeqCst), "the hung processor's future was dropped");
+        assert!(
+            eventually(Duration::from_secs(5), || async {
+                calls.load(Ordering::SeqCst) == 2
+            })
+            .await
+        );
+        assert!(
+            aborted.load(Ordering::SeqCst),
+            "the hung processor's future was dropped"
+        );
         // Detection takes one lease plus up to a third of a lease, far below the worker's 30 s.
-        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
         worker.shutdown().await;
         assert_eq!(t.xlen("hangs").await, 0);
         assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
@@ -1099,9 +1298,17 @@ mod leases {
         .set_lease("orphan", Duration::from_millis(200))
         .unwrap();
         // The worker's own lease is the 30 s default; only the type's lease is short.
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
-        assert!(eventually(Duration::from_secs(3), || async { seen.load(Ordering::SeqCst) == 1 }).await);
+        assert!(
+            eventually(Duration::from_secs(3), || async {
+                seen.load(Ordering::SeqCst) == 1
+            })
+            .await
+        );
         worker.shutdown().await;
     }
 
@@ -1137,7 +1344,11 @@ mod leases {
         .unwrap()
         .set_lease("poison", Duration::from_millis(200))
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).max_attempts(3).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .max_attempts(3)
+            .spawn()
+            .await
+            .unwrap();
 
         let dead = eventually(Duration::from_secs(3), || async {
             !t.queue.dead_letters(10).await.unwrap().is_empty()
@@ -1145,10 +1356,20 @@ mod leases {
         .await;
         worker.shutdown().await;
         assert!(dead, "the task should be dead-lettered");
-        assert_eq!(runs.load(Ordering::SeqCst), 0, "a crash-looping task must not run again");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "a crash-looping task must not run again"
+        );
         let letters = dead_tasks(&t.queue).await;
         assert_eq!(letters[0].id, id);
-        assert!(letters[0].last_error.as_deref().unwrap().contains("delivered 4 times"));
+        assert!(
+            letters[0]
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("delivered 4 times")
+        );
         assert_eq!(t.xlen("poison").await, 0);
     }
 
@@ -1198,14 +1419,23 @@ mod leases {
         .unwrap()
         .set_lease("busy", Duration::from_millis(300))
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
 
-        let reclaimed =
-            eventually(Duration::from_secs(4), || async { seen.lock().unwrap().contains(&999) }).await;
+        let reclaimed = eventually(Duration::from_secs(4), || async {
+            seen.lock().unwrap().contains(&999)
+        })
+        .await;
         refresher.abort();
         worker.shutdown().await;
         assert!(reclaimed, "the crashed consumer's task was never reclaimed");
-        assert_eq!(*seen.lock().unwrap(), vec![999], "live tasks must not be reclaimed");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![999],
+            "live tasks must not be reclaimed"
+        );
     }
 
     #[tokio::test]
@@ -1230,18 +1460,31 @@ mod leases {
         // 300 tasks held at once by one worker need three renewal batches every 100 ms. The
         // second worker would reclaim any lease that lapsed.
         let queue = t.queue.clone();
-        let worker = |runs| fast(Worker::builder(queue.clone(), reg(runs))).concurrency(300).adaptive_concurrency(false);
+        let worker = |runs| {
+            fast(Worker::builder(queue.clone(), reg(runs)))
+                .concurrency(300)
+                .adaptive_concurrency(false)
+        };
         let w1 = worker(runs.clone()).spawn().await.unwrap();
         for n in 0..300 {
             t.queue.submit("slow", &ctx(n)).await.unwrap();
         }
-        assert!(eventually(Duration::from_secs(2), || async { runs.load(Ordering::SeqCst) == 300 }).await);
+        assert!(
+            eventually(Duration::from_secs(2), || async {
+                runs.load(Ordering::SeqCst) == 300
+            })
+            .await
+        );
         let w2 = worker(runs.clone()).spawn().await.unwrap();
         // Shutdown waits for in-flight tasks, giving w2 a second to reclaim any lapsed lease.
         w1.shutdown().await;
         w2.shutdown().await;
         assert_eq!(t.xlen("slow").await, 0);
-        assert_eq!(runs.load(Ordering::SeqCst), 300, "no lease lapsed, so no task ran twice");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            300,
+            "no lease lapsed, so no task ran twice"
+        );
     }
 
     #[tokio::test]
@@ -1249,12 +1492,16 @@ mod leases {
         let Some(t) = setup().await else { return };
         let mut reg = Registry::new();
         reg.register("t", |_: Ctx| async { Ok(()) }).unwrap();
-        let short = fast(Worker::builder(t.queue.clone(), reg.clone())).lease(Duration::from_millis(10));
+        let short =
+            fast(Worker::builder(t.queue.clone(), reg.clone())).lease(Duration::from_millis(10));
         assert!(matches!(short.spawn().await, Err(Error::InvalidConfig(_))));
 
         reg.set_lease("t", Duration::from_millis(50)).unwrap();
         let short_type = fast(Worker::builder(t.queue.clone(), reg));
-        assert!(matches!(short_type.spawn().await, Err(Error::InvalidConfig(_))));
+        assert!(matches!(
+            short_type.spawn().await,
+            Err(Error::InvalidConfig(_))
+        ));
     }
 }
 
@@ -1298,8 +1545,16 @@ mod migration {
             .await
             .unwrap();
         let chain = uuid::Uuid::new_v4();
-        let _: String = t.conn.xadd(&old_stream, "*", &[("task", envelope(1, Some(chain)))]).await.unwrap();
-        let _: () = t.conn.zadd(&old_delayed, envelope(2, None), 0).await.unwrap();
+        let _: String = t
+            .conn
+            .xadd(&old_stream, "*", &[("task", envelope(1, Some(chain)))])
+            .await
+            .unwrap();
+        let _: () = t
+            .conn
+            .zadd(&old_delayed, envelope(2, None), 0)
+            .await
+            .unwrap();
 
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut reg = Registry::new();
@@ -1312,13 +1567,27 @@ mod migration {
             }
         })
         .unwrap();
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
-        let both = eventually(Duration::from_secs(5), || async { seen.lock().unwrap().len() == 2 }).await;
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
+        let both = eventually(Duration::from_secs(5), || async {
+            seen.lock().unwrap().len() == 2
+        })
+        .await;
         worker.shutdown().await;
         assert!(both, "ran {:?}", seen.lock().unwrap());
 
-        let status = t.queue.chain_status(&ChainId::<u32>::from_uuid(chain)).await.unwrap();
-        assert_eq!(status, Some(ChainStatus::Completed(10)), "the 0.1 chain's status is still readable");
+        let status = t
+            .queue
+            .chain_status(&ChainId::<u32>::from_uuid(chain))
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            Some(ChainStatus::Completed(10)),
+            "the 0.1 chain's status is still readable"
+        );
         let left: usize = t.conn.xlen(&old_stream).await.unwrap();
         let retries: usize = t.conn.zcard(&old_delayed).await.unwrap();
         assert_eq!((left, retries), (0, 0));
@@ -1334,15 +1603,34 @@ mod migration {
         let mut env: serde_json::Value = serde_json::from_str(&envelope(2, Some(chain))).unwrap();
         env["chain"]["remaining"] = serde_json::json!(["double"]);
         let mut reg = Registry::new();
-        reg.register(OLD, |c: Ctx| async move { Ok(c.n * 10) }).unwrap();
+        reg.register(OLD, |c: Ctx| async move { Ok(c.n * 10) })
+            .unwrap();
         reg.register(DOUBLE, |n| async move { Ok(n * 2) }).unwrap();
         // Creates the group, so the entry added next is delivered.
-        let worker = fast(Worker::builder(t.queue.clone(), reg)).spawn().await.unwrap();
-        let _: () = t.conn.hset_multiple(format!("{{{}}}:chain:{chain}", t.queue.namespace()), &[("state", "running"), ("step", "0"), ("total", "2")]).await.unwrap();
-        let _: String = t.conn.xadd(t.queue.stream_key("old"), "*", &[("task", env.to_string())]).await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
+        let _: () = t
+            .conn
+            .hset_multiple(
+                format!("{{{}}}:chain:{chain}", t.queue.namespace()),
+                &[("state", "running"), ("step", "0"), ("total", "2")],
+            )
+            .await
+            .unwrap();
+        let _: String = t
+            .conn
+            .xadd(t.queue.stream_key("old"), "*", &[("task", env.to_string())])
+            .await
+            .unwrap();
 
         let id = ChainId::<u32>::from_uuid(chain);
-        let status = t.queue.wait_for_chain(&id, Duration::from_secs(5)).await.unwrap();
+        let status = t
+            .queue
+            .wait_for_chain(&id, Duration::from_secs(5))
+            .await
+            .unwrap();
         worker.shutdown().await;
         assert_eq!(status, Some(ChainStatus::Completed(40)));
         assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
@@ -1352,18 +1640,29 @@ mod migration {
     async fn submit_stores_the_context_in_its_own_field() {
         let Some(mut t) = setup().await else { return };
         t.queue.submit(OLD, &ctx(7)).await.unwrap();
-        let reply: redis::streams::StreamRangeReply = t.conn.xrange_all(t.queue.stream_key("old")).await.unwrap();
+        let reply: redis::streams::StreamRangeReply =
+            t.conn.xrange_all(t.queue.stream_key("old")).await.unwrap();
         let entry = &reply.ids[0];
-        assert_eq!(entry.get::<String>("context").as_deref(), Some(serde_json::to_string(&ctx(7)).unwrap().as_str()));
-        let header: serde_json::Value = serde_json::from_str(&entry.get::<String>("task").unwrap()).unwrap();
-        assert_eq!((header["processor_type"].as_str(), header.get("context")), (Some("old"), None));
+        assert_eq!(
+            entry.get::<String>("context").as_deref(),
+            Some(serde_json::to_string(&ctx(7)).unwrap().as_str())
+        );
+        let header: serde_json::Value =
+            serde_json::from_str(&entry.get::<String>("task").unwrap()).unwrap();
+        assert_eq!(
+            (header["processor_type"].as_str(), header.get("context")),
+            (Some("old"), None)
+        );
     }
 
     #[tokio::test]
     async fn namespaces_with_braces_are_rejected() {
         let client = redis::Client::open(redis_url()).unwrap();
         let err = TaskQueue::from_client(client, "a{b}").await.unwrap_err();
-        assert!(matches!(err, redis_task_graph::Error::InvalidNamespace(_)), "{err}");
+        assert!(
+            matches!(err, redis_task_graph::Error::InvalidNamespace(_)),
+            "{err}"
+        );
     }
 }
 
@@ -1379,7 +1678,10 @@ mod consumers {
             .await
             .unwrap();
         info.iter()
-            .filter_map(|c| c.get("name").and_then(|v| redis::from_redis_value_ref::<String>(v).ok()))
+            .filter_map(|c| {
+                c.get("name")
+                    .and_then(|v| redis::from_redis_value_ref::<String>(v).ok())
+            })
             .collect()
     }
 
@@ -1392,7 +1694,11 @@ mod consumers {
     #[tokio::test]
     async fn shutdown_removes_the_workers_consumer() {
         let Some(mut t) = setup().await else { return };
-        let worker = fast(Worker::builder(t.queue.clone(), noop_registry())).consumer_name("leaving").spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), noop_registry()))
+            .consumer_name("leaving")
+            .spawn()
+            .await
+            .unwrap();
         t.queue.submit("t", &ctx(1)).await.unwrap();
         for _ in 0..200 {
             if t.xlen("t").await == 0 {
@@ -1409,7 +1715,11 @@ mod consumers {
     #[tokio::test]
     async fn consumer_with_pending_entries_is_kept() {
         let Some(mut t) = setup().await else { return };
-        let worker = fast(Worker::builder(t.queue.clone(), noop_registry())).consumer_name("holder").spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), noop_registry()))
+            .consumer_name("holder")
+            .spawn()
+            .await
+            .unwrap();
         // Stop the worker's loops from seeing the entry: claim it as the same consumer by hand,
         // as if a finalize had failed and left it pending.
         worker.shutdown().await;
@@ -1428,8 +1738,16 @@ mod consumers {
             .unwrap();
         // A restart under the same name has the entry pending at shutdown (its lease is 30 s, so
         // it isn't reclaimed meanwhile).
-        let worker = fast(Worker::builder(t.queue.clone(), noop_registry())).consumer_name("holder").spawn().await.unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), noop_registry()))
+            .consumer_name("holder")
+            .spawn()
+            .await
+            .unwrap();
         worker.shutdown().await;
-        assert_eq!(consumers(&mut t, "t").await, vec!["holder".to_string()], "removing it would orphan the entry");
+        assert_eq!(
+            consumers(&mut t, "t").await,
+            vec!["holder".to_string()],
+            "removing it would orphan the entry"
+        );
     }
 }

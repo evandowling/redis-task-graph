@@ -216,6 +216,10 @@ mod tests {
         liveness.cancel(CancelReason::Shutdown);
         assert_eq!(waiter.await.unwrap(), CancelReason::LeaseLost);
         assert_eq!(control.cancel_reason(), Some(CancelReason::LeaseLost));
-        assert_eq!(control.cancelled().await, CancelReason::LeaseLost, "resolves at once when already cancelled");
+        assert_eq!(
+            control.cancelled().await,
+            CancelReason::LeaseLost,
+            "resolves at once when already cancelled"
+        );
     }
 }

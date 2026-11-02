@@ -58,11 +58,23 @@ impl Pad {
 
 impl Job {
     pub fn new(id: u64, len: u32, pad: Pad) -> Self {
-        let mut job = Self { id, t0_us: now_us(), hop: 0, len, pad: String::new(), numbers: Vec::new(), bytes: Vec::new() };
+        let mut job = Self {
+            id,
+            t0_us: now_us(),
+            hop: 0,
+            len,
+            pad: String::new(),
+            numbers: Vec::new(),
+            bytes: Vec::new(),
+        };
         match pad {
             Pad::Text(n) => job.pad = "x".repeat(n),
             // Multiplying by an odd constant spreads consecutive values over the whole range.
-            Pad::Numbers(n) => job.numbers = (0..n as u32 / 4).map(|i| i.wrapping_mul(2_654_435_761)).collect(),
+            Pad::Numbers(n) => {
+                job.numbers = (0..n as u32 / 4)
+                    .map(|i| i.wrapping_mul(2_654_435_761))
+                    .collect()
+            }
             Pad::Bytes(n) => job.bytes = (0..n).map(|i| i as u8).collect(),
         }
         job
@@ -70,7 +82,10 @@ impl Job {
 }
 
 pub fn now_us() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64
 }
 
 /// What each processor invocation does before returning.
@@ -94,12 +109,16 @@ pub async fn do_work(work: Work) {
         Work::Noop => {}
         Work::AsyncWait(d) => io_wait(d).await,
         Work::BlockingSleep(d) => std::thread::sleep(d),
-        Work::SpawnBlockingSleep(d) => tokio::task::spawn_blocking(move || std::thread::sleep(d)).await.unwrap(),
+        Work::SpawnBlockingSleep(d) => tokio::task::spawn_blocking(move || std::thread::sleep(d))
+            .await
+            .unwrap(),
         Work::CpuInline(iters) => {
             burn(iters);
         }
         Work::CpuSpawnBlocking(iters) => {
-            tokio::task::spawn_blocking(move || burn(iters)).await.unwrap();
+            tokio::task::spawn_blocking(move || burn(iters))
+                .await
+                .unwrap();
         }
     }
 }
@@ -141,7 +160,11 @@ static IO_DEVICE: LazyLock<mpsc::Sender<(Instant, oneshot::Sender<()>)>> = LazyL
                 match rx.try_recv() {
                     Ok((deadline, done)) => {
                         seq += 1;
-                        pending.push(Reverse(Completion { deadline, seq, done }));
+                        pending.push(Reverse(Completion {
+                            deadline,
+                            seq,
+                            done,
+                        }));
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => return,
@@ -156,7 +179,11 @@ static IO_DEVICE: LazyLock<mpsc::Sender<(Instant, oneshot::Sender<()>)>> = LazyL
                 None => match rx.recv() {
                     Ok((deadline, done)) => {
                         seq += 1;
-                        pending.push(Reverse(Completion { deadline, seq, done }));
+                        pending.push(Reverse(Completion {
+                            deadline,
+                            seq,
+                            done,
+                        }));
                     }
                     Err(_) => return,
                 },
@@ -241,8 +268,15 @@ impl Recorder {
 
     /// Seconds from worker start to the last processor execution.
     pub fn active_secs(&self) -> f64 {
-        let (a, b) = (self.start_us.load(Ordering::Relaxed), self.last_us.load(Ordering::Relaxed));
-        if a == u64::MAX || b <= a { 1e-9 } else { (b - a) as f64 / 1e6 }
+        let (a, b) = (
+            self.start_us.load(Ordering::Relaxed),
+            self.last_us.load(Ordering::Relaxed),
+        );
+        if a == u64::MAX || b <= a {
+            1e-9
+        } else {
+            (b - a) as f64 / 1e6
+        }
     }
 
     pub fn take_latencies_ms(&self) -> Vec<f64> {
@@ -318,7 +352,14 @@ pub struct ClusterSpec {
 
 impl ClusterSpec {
     pub fn new(concurrency: usize, work: Work) -> Self {
-        Self { workers: 1, threads: 8, concurrency, lease: Duration::from_secs(30), work, adaptive: PUSHBACK.load(Ordering::Relaxed) }
+        Self {
+            workers: 1,
+            threads: 8,
+            concurrency,
+            lease: Duration::from_secs(30),
+            work,
+            adaptive: PUSHBACK.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -371,7 +412,11 @@ impl Cluster {
 
 /// Runtime for producers and measurement, separate from the workers.
 pub fn driver() -> Runtime {
-    tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap()
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
 }
 
 pub fn fresh_ns() -> String {
@@ -388,7 +433,10 @@ pub async fn cleanup(ns: &str) {
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     // SCAN rather than KEYS, which blocks Redis while it walks the whole keyspace.
     let keys: Vec<String> = {
-        let mut iter = conn.scan_match::<_, String>(format!("{{{ns}}}:*")).await.unwrap();
+        let mut iter = conn
+            .scan_match::<_, String>(format!("{{{ns}}}:*"))
+            .await
+            .unwrap();
         let mut keys = Vec::new();
         while let Some(key) = iter.next_item().await {
             keys.push(key.unwrap());
@@ -488,8 +536,16 @@ pub fn drain(spec: ClusterSpec, shape: Shape, jobs: usize, pad: Pad) -> DrainRes
 }
 
 /// Runs [`drain`] `reps` times and returns the run with the median rate.
-pub fn drain_median(spec: ClusterSpec, shape: Shape, jobs: usize, pad: Pad, reps: usize) -> DrainResult {
-    let mut runs: Vec<DrainResult> = (0..reps.max(1)).map(|_| drain(spec, shape, jobs, pad)).collect();
+pub fn drain_median(
+    spec: ClusterSpec,
+    shape: Shape,
+    jobs: usize,
+    pad: Pad,
+    reps: usize,
+) -> DrainResult {
+    let mut runs: Vec<DrainResult> = (0..reps.max(1))
+        .map(|_| drain(spec, shape, jobs, pad))
+        .collect();
     runs.sort_by(|a, b| a.rate.partial_cmp(&b.rate).unwrap());
     runs.swap_remove(runs.len() / 2)
 }

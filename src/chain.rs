@@ -112,7 +112,10 @@ pub struct ChainBuilder<'q, Out> {
 
 impl<Out> fmt::Debug for ChainBuilder<'_, Out> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let steps: Vec<&str> = std::iter::once(&self.first).chain(&self.rest).map(String::as_str).collect();
+        let steps: Vec<&str> = std::iter::once(&self.first)
+            .chain(&self.rest)
+            .map(String::as_str)
+            .collect();
         f.debug_struct("ChainBuilder")
             .field("queue", self.queue)
             .field("steps", &steps)
@@ -187,7 +190,10 @@ impl<'q, Out> ChainBuilder<'q, Out> {
             .xadd(
                 keys.stream(&header.processor_type),
                 "*",
-                &[(PAYLOAD_FIELD, head.as_str()), (CONTEXT_FIELD, context.as_str())],
+                &[
+                    (PAYLOAD_FIELD, head.as_str()),
+                    (CONTEXT_FIELD, context.as_str()),
+                ],
             )
             .ignore()
             .query_async(&mut conn)
@@ -225,14 +231,22 @@ mod tests {
     use super::*;
 
     fn fields(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn parses_each_state() {
         assert_eq!(parse_status::<u32>(HashMap::new()).unwrap(), None);
         assert_eq!(
-            parse_status::<u32>(fields(&[("state", "running"), ("step", "1"), ("total", "3")])).unwrap(),
+            parse_status::<u32>(fields(&[
+                ("state", "running"),
+                ("step", "1"),
+                ("total", "3")
+            ]))
+            .unwrap(),
             Some(ChainStatus::Running { step: 1, total: 3 })
         );
         assert_eq!(
@@ -240,13 +254,23 @@ mod tests {
             Some(ChainStatus::Completed(42))
         );
         assert_eq!(
-            parse_status::<u32>(fields(&[("state", "failed"), ("step", "2"), ("error", "boom")])).unwrap(),
-            Some(ChainStatus::Failed { step: 2, error: "boom".into() })
+            parse_status::<u32>(fields(&[
+                ("state", "failed"),
+                ("step", "2"),
+                ("error", "boom")
+            ]))
+            .unwrap(),
+            Some(ChainStatus::Failed {
+                step: 2,
+                error: "boom".into()
+            })
         );
     }
 
     #[test]
     fn completed_output_with_wrong_type_is_an_error() {
-        assert!(parse_status::<u32>(fields(&[("state", "completed"), ("output", "\"x\"")])).is_err());
+        assert!(
+            parse_status::<u32>(fields(&[("state", "completed"), ("output", "\"x\"")])).is_err()
+        );
     }
 }

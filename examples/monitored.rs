@@ -49,7 +49,11 @@ fn registry() -> Registry {
     .unwrap()
     .register("flaky", |_: u64| async {
         io(5, 20).await;
-        if rand::random_bool(0.3) { Err("upstream timed out".into()) } else { Ok(()) }
+        if rand::random_bool(0.3) {
+            Err("upstream timed out".into())
+        } else {
+            Ok(())
+        }
     })
     .unwrap()
     // Deliberately blocks a runtime thread: the case pushback exists for.
@@ -80,13 +84,24 @@ fn registry() -> Registry {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Retries are expected in this workload; only show errors.
     tracing_subscriber::fmt().with_env_filter("error").init();
-    let minutes: u64 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(10);
+    let minutes: u64 = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(10);
 
     // Endpoint and auth headers come from OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS.
     let exporter = MetricExporter::builder().with_http().build()?;
     let provider = SdkMeterProvider::builder()
-        .with_reader(PeriodicReader::builder(exporter).with_interval(Duration::from_secs(5)).build())
-        .with_resource(Resource::builder().with_service_name("redis-task-graph-demo").build())
+        .with_reader(
+            PeriodicReader::builder(exporter)
+                .with_interval(Duration::from_secs(5))
+                .build(),
+        )
+        .with_resource(
+            Resource::builder()
+                .with_service_name("redis-task-graph-demo")
+                .build(),
+        )
         .build();
     opentelemetry::global::set_meter_provider(provider.clone());
 
@@ -124,7 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             queue.submit("flaky", &n).await?;
         }
         if n.is_multiple_of(2) {
-            queue.chain(PARSE, &format!("job-{n}")).then(ENRICH).then(STORE).submit().await?;
+            queue
+                .chain(PARSE, &format!("job-{n}"))
+                .then(ENRICH)
+                .then(STORE)
+                .submit()
+                .await?;
         }
         // A burst of 3000 fetches every minute, and runtime-blocking tasks every 90 s.
         if n % 600 == 300 {

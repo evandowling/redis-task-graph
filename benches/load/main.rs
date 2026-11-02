@@ -31,12 +31,18 @@ fn perf_dir() -> PathBuf {
 /// Value following `flag` on the command line, if present.
 fn flag_value(args: &[String], flag: &str) -> Option<PathBuf> {
     args.iter().position(|a| a == flag).map(|i| {
-        PathBuf::from(args.get(i + 1).unwrap_or_else(|| panic!("{flag} needs a directory")))
+        PathBuf::from(
+            args.get(i + 1)
+                .unwrap_or_else(|| panic!("{flag} needs a directory")),
+        )
     })
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--bench").collect();
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--bench")
+        .collect();
     let quick = args.iter().any(|a| a == "--quick");
     // With `--features otel`, `--otel` streams the library's metrics to the OTLP endpoint in
     // OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS while the scenarios run.
@@ -53,15 +59,23 @@ fn main() {
     let compare_dir = flag_value(&args, "--compare");
     let noise_dir = flag_value(&args, "--noise");
     let current_dir = flag_value(&args, "--current");
-    let plot_only = args.iter().any(|a| a == "--plot") || compare_dir.is_some() || current_dir.is_some();
-    let values: Vec<&PathBuf> = compare_dir.iter().chain(noise_dir.iter()).chain(current_dir.iter()).collect();
+    let plot_only =
+        args.iter().any(|a| a == "--plot") || compare_dir.is_some() || current_dir.is_some();
+    let values: Vec<&PathBuf> = compare_dir
+        .iter()
+        .chain(noise_dir.iter())
+        .chain(current_dir.iter())
+        .collect();
     let selected: Vec<&str> = args
         .iter()
         .filter(|a| !a.starts_with("--") && !values.iter().any(|v| v.as_os_str() == a.as_str()))
         .map(String::as_str)
         .collect();
     for name in &selected {
-        assert!(scenarios::ALL.iter().any(|(n, _)| n == name), "unknown scenario `{name}`");
+        assert!(
+            scenarios::ALL.iter().any(|(n, _)| n == name),
+            "unknown scenario `{name}`"
+        );
     }
 
     let results = current_dir.unwrap_or_else(|| perf_dir().join("results"));
@@ -71,7 +85,9 @@ fn main() {
 
     if !plot_only {
         write_environment(&results);
-        let opts = scenarios::Opts { scale: if quick { 0.1 } else { 1.0 } };
+        let opts = scenarios::Opts {
+            scale: if quick { 0.1 } else { 1.0 },
+        };
         for (name, run) in scenarios::ALL {
             if !selected.is_empty() && !selected.contains(name) {
                 continue;
@@ -96,7 +112,14 @@ fn main() {
     }
     std::fs::write(results.join("summary.md"), summary(&figures)).unwrap();
     if let Some(baseline) = &compare_dir {
-        compare::run(&figures, baseline, noise_dir.as_deref(), &perf_dir(), &graphs).unwrap();
+        compare::run(
+            &figures,
+            baseline,
+            noise_dir.as_deref(),
+            &perf_dir(),
+            &graphs,
+        )
+        .unwrap();
         eprintln!("wrote {}", perf_dir().join("comparison.md").display());
     }
     eprintln!("wrote {} graphs to {}", figures.len(), graphs.display());
@@ -112,8 +135,16 @@ fn install_otel() -> opentelemetry_sdk::metrics::SdkMeterProvider {
         .build()
         .expect("OTLP exporter");
     let provider = SdkMeterProvider::builder()
-        .with_reader(PeriodicReader::builder(exporter).with_interval(std::time::Duration::from_secs(5)).build())
-        .with_resource(opentelemetry_sdk::Resource::builder().with_service_name("redis-task-graph-bench").build())
+        .with_reader(
+            PeriodicReader::builder(exporter)
+                .with_interval(std::time::Duration::from_secs(5))
+                .build(),
+        )
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name("redis-task-graph-bench")
+                .build(),
+        )
         .build();
     opentelemetry::global::set_meter_provider(provider.clone());
     provider
@@ -141,7 +172,11 @@ fn write_environment(dir: &Path) {
     let info: String = rt.block_on(async {
         let client = redis::Client::open(harness::REDIS_URL).unwrap();
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-        redis::cmd("INFO").arg("server").query_async(&mut conn).await.unwrap()
+        redis::cmd("INFO")
+            .arg("server")
+            .query_async(&mut conn)
+            .await
+            .unwrap()
     });
     let field = |k: &str| {
         info.lines()
@@ -156,7 +191,11 @@ fn write_environment(dir: &Path) {
         "os": std::env::consts::OS,
         "hardware_threads": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
     });
-    std::fs::write(dir.join("environment.json"), serde_json::to_string_pretty(&env).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("environment.json"),
+        serde_json::to_string_pretty(&env).unwrap(),
+    )
+    .unwrap();
 }
 
 /// One markdown table per figure: a row per x value, a column per series.
@@ -164,7 +203,11 @@ fn summary(figures: &[Figure]) -> String {
     let mut out = String::from("# Benchmark results\n\nGenerated by `cargo bench --bench load`.\n");
     for fig in figures {
         out += &format!("\n## {} (`{}`)\n\n{}\n\n", fig.title, fig.id, fig.subtitle);
-        let mut xs: Vec<f64> = fig.series.iter().flat_map(|s| s.points.iter().map(|p| p.0)).collect();
+        let mut xs: Vec<f64> = fig
+            .series
+            .iter()
+            .flat_map(|s| s.points.iter().map(|p| p.0))
+            .collect();
         xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         xs.dedup();
         out += &format!("| {} |", fig.x_label);

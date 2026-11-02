@@ -129,12 +129,18 @@ impl Monitored {
 
     /// Records how long a processor waited between being spawned and starting to run.
     pub(crate) fn record_start_delay(&self, delay: Duration) {
-        self.start_delay_us.fetch_max(delay.as_micros() as u64, Ordering::AcqRel);
+        self.start_delay_us
+            .fetch_max(delay.as_micros() as u64, Ordering::AcqRel);
     }
 
     /// Starts renewing the lease on an entry until the returned guard is dropped. While the
     /// task's processor runs and uses heartbeats, renewal also requires recent beats.
-    pub(crate) fn hold_lease(self: &Arc<Self>, stream: u32, id: &str, lease: Duration) -> LeaseGuard {
+    pub(crate) fn hold_lease(
+        self: &Arc<Self>,
+        stream: u32,
+        id: &str,
+        lease: Duration,
+    ) -> LeaseGuard {
         let key: LeaseKey = (stream, id.into());
         let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % SHARDS;
         let liveness = Arc::new(Liveness::default());
@@ -258,7 +264,15 @@ fn run(config: MonitorConfig, monitored: Weak<Monitored>, runtime: Handle, stop:
         // A panic must not end the thread: leases would silently stop being renewed while the
         // worker kept claiming tasks. Log it, stop claiming, and try again next tick.
         let ticked = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            tick(&config, &shared, &runtime, &probe, &mut probe_sent, &mut controller, &mut conn)
+            tick(
+                &config,
+                &shared,
+                &runtime,
+                &probe,
+                &mut probe_sent,
+                &mut controller,
+                &mut conn,
+            )
         }));
         idle = false;
         match ticked {
@@ -314,13 +328,16 @@ fn tick(
         *probe_sent = now;
         let p = probe.clone();
         runtime.spawn(async move {
-            p.last_us.store(now.elapsed().as_micros() as u64, Ordering::Release);
+            p.last_us
+                .store(now.elapsed().as_micros() as u64, Ordering::Release);
             p.pending.store(false, Ordering::Release);
         });
         lag
     };
     let lag = probe_lag.max(start_delay);
-    shared.lag_us.store(lag.as_micros() as u64, Ordering::Release);
+    shared
+        .lag_us
+        .store(lag.as_micros() as u64, Ordering::Release);
 
     if config.adaptive {
         adjust_limit(controller, &shared.limiter, lag, now);
@@ -343,7 +360,12 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
-    pub(crate) fn new(lag_budget: Duration, probe_interval: Duration, min: usize, max: usize) -> Self {
+    pub(crate) fn new(
+        lag_budget: Duration,
+        probe_interval: Duration,
+        min: usize,
+        max: usize,
+    ) -> Self {
         Self {
             lag_budget,
             cooldown: lag_budget.max(probe_interval),
@@ -356,7 +378,14 @@ impl Controller {
 
     /// The new limit given the current limit, permits in use, whether demand exceeded the limit
     /// since the last sample, and a lag sample.
-    pub(crate) fn next_limit(&mut self, limit: usize, in_flight: usize, saturated: bool, lag: Duration, now: Instant) -> usize {
+    pub(crate) fn next_limit(
+        &mut self,
+        limit: usize,
+        in_flight: usize,
+        saturated: bool,
+        lag: Duration,
+        now: Instant,
+    ) -> usize {
         if lag > self.lag_budget {
             self.slow_start = false;
             // Work admitted before the last cut keeps the runtime busy until it drains; cutting
@@ -365,10 +394,16 @@ impl Controller {
             let cooled = self.last_decrease.is_none_or(|t| now - t >= self.cooldown);
             if settled && cooled && limit > self.min {
                 self.last_decrease = Some(now);
-                return ((limit as f64 * DECREASE_FACTOR) as usize).min(limit - 1).max(self.min);
+                return ((limit as f64 * DECREASE_FACTOR) as usize)
+                    .min(limit - 1)
+                    .max(self.min);
             }
         } else if lag <= self.lag_budget / 2 && saturated && limit < self.max {
-            let grown = if self.slow_start { limit * 2 } else { limit + 1 };
+            let grown = if self.slow_start {
+                limit * 2
+            } else {
+                limit + 1
+            };
             return grown.min(self.max);
         }
         limit
@@ -377,10 +412,21 @@ impl Controller {
 
 fn adjust_limit(controller: &mut Controller, limiter: &Limiter, lag: Duration, now: Instant) {
     let limit = limiter.limit();
-    let next = controller.next_limit(limit, limiter.in_flight(), limiter.take_contended(), lag, now);
+    let next = controller.next_limit(
+        limit,
+        limiter.in_flight(),
+        limiter.take_contended(),
+        lag,
+        now,
+    );
     if next != limit {
         if next < limit {
-            debug!(?lag, from = limit, to = next, "scheduling lag over budget; reducing concurrency");
+            debug!(
+                ?lag,
+                from = limit,
+                to = next,
+                "scheduling lag over budget; reducing concurrency"
+            );
         }
         limiter.set_limit(next);
     }
@@ -405,7 +451,11 @@ fn renew_leases(
             // and abort it.
             if lease.liveness.silence().is_some_and(|s| s >= lease.lease) {
                 let stream = &shared.streams[key.0 as usize];
-                debug!(stream, id = &*key.1, "no heartbeat for a whole lease; not renewing");
+                debug!(
+                    stream,
+                    id = &*key.1,
+                    "no heartbeat for a whole lease; not renewing"
+                );
                 lease.liveness.abort();
             } else {
                 due.push((shard, key.clone()));
@@ -431,7 +481,11 @@ fn renew_leases(
                     // -1: acked between the renewal being scheduled and sent.
                     if status != -1 {
                         let stream = &shared.streams[key.0 as usize];
-                        warn!(stream, id = &*key.1, "lease lost; another worker may run this task");
+                        warn!(
+                            stream,
+                            id = &*key.1,
+                            "lease lost; another worker may run this task"
+                        );
                         crate::telemetry::lease_lost(stream);
                         if let Some(lease) = removed {
                             lease.liveness.cancel(CancelReason::LeaseLost);
@@ -461,7 +515,9 @@ fn connection<'a>(
     conn: &'a mut Option<redis::Connection>,
 ) -> redis::RedisResult<&'a mut redis::Connection> {
     if conn.is_none() {
-        let c = config.client.get_connection_with_timeout(Duration::from_secs(1))?;
+        let c = config
+            .client
+            .get_connection_with_timeout(Duration::from_secs(1))?;
         c.set_read_timeout(Some(Duration::from_secs(1)))?;
         c.set_write_timeout(Some(Duration::from_secs(1)))?;
         *conn = Some(c);
@@ -481,9 +537,21 @@ mod tests {
         let t = Instant::now();
         assert_eq!(c.next_limit(4, 4, true, MS, t), 8);
         assert_eq!(c.next_limit(8, 8, true, MS, t), 16);
-        assert_eq!(c.next_limit(16, 3, false, MS, t), 16, "no growth without demand");
-        assert_eq!(c.next_limit(16, 16, true, 80 * MS, t), 11, "cut by 30% on lag");
-        assert_eq!(c.next_limit(11, 11, true, MS, t), 12, "linear growth after the first cut");
+        assert_eq!(
+            c.next_limit(16, 3, false, MS, t),
+            16,
+            "no growth without demand"
+        );
+        assert_eq!(
+            c.next_limit(16, 16, true, 80 * MS, t),
+            11,
+            "cut by 30% on lag"
+        );
+        assert_eq!(
+            c.next_limit(11, 11, true, MS, t),
+            12,
+            "linear growth after the first cut"
+        );
         assert_eq!(c.next_limit(64, 64, true, MS, t), 64, "capped at max");
     }
 
@@ -492,9 +560,21 @@ mod tests {
         let mut c = Controller::new(50 * MS, 10 * MS, 2, 64);
         let t = Instant::now();
         assert_eq!(c.next_limit(32, 32, true, 80 * MS, t), 22);
-        assert_eq!(c.next_limit(22, 22, true, 80 * MS, t + 10 * MS), 22, "within cooldown");
-        assert_eq!(c.next_limit(22, 30, true, 80 * MS, t + 60 * MS), 22, "earlier admissions still draining");
+        assert_eq!(
+            c.next_limit(22, 22, true, 80 * MS, t + 10 * MS),
+            22,
+            "within cooldown"
+        );
+        assert_eq!(
+            c.next_limit(22, 30, true, 80 * MS, t + 60 * MS),
+            22,
+            "earlier admissions still draining"
+        );
         assert_eq!(c.next_limit(22, 22, true, 80 * MS, t + 60 * MS), 15);
-        assert_eq!(c.next_limit(2, 2, true, 80 * MS, t + 200 * MS), 2, "never below min");
+        assert_eq!(
+            c.next_limit(2, 2, true, 80 * MS, t + 200 * MS),
+            2,
+            "never below min"
+        );
     }
 }

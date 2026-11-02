@@ -57,7 +57,11 @@ const FONT: &str = "sans-serif";
 /// Writes `<id>.svg` (light) and `<id>-dark.svg` into `dir`.
 pub fn render(fig: &Figure, dir: &Path) -> Result<(), Box<dyn Error>> {
     let colored = fig.series.iter().filter(|s| s.is_primary()).count();
-    assert!(colored <= 3, "{}: at most three colored series per chart", fig.id);
+    assert!(
+        colored <= 3,
+        "{}: at most three colored series per chart",
+        fig.id
+    );
     draw(fig, &dir.join(format!("{}.svg", fig.id)), &LIGHT)?;
     draw(fig, &dir.join(format!("{}-dark.svg", fig.id)), &DARK)?;
     Ok(())
@@ -95,7 +99,10 @@ fn axis_range(values: &[f64], scale: Scale, from_zero: bool) -> (f64, f64) {
         Scale::Linear => {
             let lo = if from_zero { 0.0 } else { lo };
             let span = (hi - lo).max(1e-9);
-            (lo - if from_zero { 0.0 } else { span * 0.05 }, hi + span * 0.08)
+            (
+                lo - if from_zero { 0.0 } else { span * 0.05 },
+                hi + span * 0.08,
+            )
         }
         Scale::Log2 | Scale::Log10 => {
             let (mut lo, mut hi) = (lo - 0.15, hi + 0.15);
@@ -120,11 +127,20 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
     let root = SVGBackend::new(path, (WIDTH, HEIGHT)).into_drawing_area();
     root.fill(&theme.surface)?;
 
-    let left = TextStyle::from((FONT, 22).into_font().style(FontStyle::Bold)).color(&theme.text_primary);
-    root.draw(&Text::new(fig.title.clone(), (28, 30), left.pos(Pos::new(HPos::Left, VPos::Center))))?;
+    let left =
+        TextStyle::from((FONT, 22).into_font().style(FontStyle::Bold)).color(&theme.text_primary);
+    root.draw(&Text::new(
+        fig.title.clone(),
+        (28, 30),
+        left.pos(Pos::new(HPos::Left, VPos::Center)),
+    ))?;
     if !fig.subtitle.is_empty() {
         let sub = TextStyle::from((FONT, 15).into_font()).color(&theme.text_secondary);
-        root.draw(&Text::new(fig.subtitle.clone(), (28, 56), sub.pos(Pos::new(HPos::Left, VPos::Center))))?;
+        root.draw(&Text::new(
+            fig.subtitle.clone(),
+            (28, 56),
+            sub.pos(Pos::new(HPos::Left, VPos::Center)),
+        ))?;
     }
 
     // Legend row under the title: a swatch and name per series, in series order.
@@ -139,7 +155,9 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
         .iter()
         .filter(|s| s.baseline_of.is_none())
         .map(|s| (s.name.clone(), series_style(fig, s, theme)))
-        .chain(has_baselines.then(|| ("previous run (dashed)".to_string(), (theme.reference, true))));
+        .chain(
+            has_baselines.then(|| ("previous run (dashed)".to_string(), (theme.reference, true))),
+        );
     for (name, (color, dashed)) in legend_entries {
         if dashed {
             for i in 0..3 {
@@ -149,7 +167,10 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
                 ))?;
             }
         } else {
-            root.draw(&PathElement::new(vec![(lx, ly), (lx + 24, ly)], color.stroke_width(2)))?;
+            root.draw(&PathElement::new(
+                vec![(lx, ly), (lx + 24, ly)],
+                color.stroke_width(2),
+            ))?;
             root.draw(&Circle::new((lx + 12, ly), 4, color.filled()))?;
         }
         root.draw(&Text::new(name.clone(), (lx + 32, ly), legend_font.clone()))?;
@@ -158,8 +179,16 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
 
     let (_, plot_area) = root.split_vertically(104);
 
-    let xs: Vec<f64> = fig.series.iter().flat_map(|s| s.points.iter().map(|p| to_axis(p.0, fig.x_scale))).collect();
-    let ys: Vec<f64> = fig.series.iter().flat_map(|s| s.points.iter().map(|p| to_axis(p.1, fig.y_scale))).collect();
+    let xs: Vec<f64> = fig
+        .series
+        .iter()
+        .flat_map(|s| s.points.iter().map(|p| to_axis(p.0, fig.x_scale)))
+        .collect();
+    let ys: Vec<f64> = fig
+        .series
+        .iter()
+        .flat_map(|s| s.points.iter().map(|p| to_axis(p.1, fig.y_scale)))
+        .collect();
     let (x0, x1) = axis_range(&xs, fig.x_scale, false);
     let (y0, y1) = axis_range(&ys, fig.y_scale, true);
 
@@ -210,11 +239,19 @@ fn draw(fig: &Figure, path: &Path, theme: &Theme) -> Result<(), Box<dyn Error>> 
                 .filter(|&(_, y)| y >= y0 && y <= y1)
                 .collect();
             if dashed {
-                chart.draw_series(DashedLineSeries::new(pts.clone(), 6, 5, color.stroke_width(2)))?;
+                chart.draw_series(DashedLineSeries::new(
+                    pts.clone(),
+                    6,
+                    5,
+                    color.stroke_width(2),
+                ))?;
             } else {
                 chart.draw_series(LineSeries::new(pts.clone(), color.stroke_width(2)))?;
                 // Markers with a 2px surface ring so overlapping points stay distinct.
-                chart.draw_series(pts.iter().map(|&p| Circle::new(p, 6, theme.surface.filled())))?;
+                chart.draw_series(
+                    pts.iter()
+                        .map(|&p| Circle::new(p, 6, theme.surface.filled())),
+                )?;
                 chart.draw_series(pts.iter().map(|&p| Circle::new(p, 4, color.filled())))?;
             }
             if let Some(&last) = pts.last()

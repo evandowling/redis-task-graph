@@ -105,7 +105,13 @@ impl Figure {
 pub fn format_value(v: f64, format: Format) -> String {
     match format {
         Format::Percent => {
-            if v == 0.0 { "0%".into() } else if v < 10.0 { format!("{v:.1}%") } else { format!("{v:.0}%") }
+            if v == 0.0 {
+                "0%".into()
+            } else if v < 10.0 {
+                format!("{v:.1}%")
+            } else {
+                format!("{v:.0}%")
+            }
         }
         Format::Bytes => {
             const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
@@ -115,7 +121,11 @@ pub fn format_value(v: f64, format: Format) -> String {
                 v /= 1024.0;
                 unit += 1;
             }
-            if v.fract() == 0.0 { format!("{v:.0} {}", UNITS[unit]) } else { format!("{v:.1} {}", UNITS[unit]) }
+            if v.fract() == 0.0 {
+                format!("{v:.0} {}", UNITS[unit])
+            } else {
+                format!("{v:.1} {}", UNITS[unit])
+            }
         }
         Format::Number => {
             let a = v.abs();
@@ -139,4 +149,3 @@ pub fn format_value(v: f64, format: Format) -> String {
 fn trim(s: String) -> String {
     s.strip_suffix(".0").map(str::to_owned).unwrap_or(s)
 }
-

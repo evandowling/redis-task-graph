@@ -200,7 +200,10 @@ impl Task {
     ///
     /// On failure, returns the error and the entry's text, for the dead-letter stream: an entry
     /// with both fields gives the two joined by a newline.
-    pub fn decode(task: String, context: Option<String>) -> Result<Self, (serde_json::Error, String)> {
+    pub fn decode(
+        task: String,
+        context: Option<String>,
+    ) -> Result<Self, (serde_json::Error, String)> {
         let Some(context) = context else {
             return match serde_json::from_str::<TaskEnvelope>(&task) {
                 Ok(env) => Ok(Self {
@@ -218,7 +221,10 @@ impl Task {
             };
         };
         match serde_json::from_str::<TaskHeader>(&task) {
-            Ok(header) => Ok(Self { header, context: context.into_boxed_str() }),
+            Ok(header) => Ok(Self {
+                header,
+                context: context.into_boxed_str(),
+            }),
             Err(e) => Err((e, format!("{task}\n{context}"))),
         }
     }
@@ -255,7 +261,8 @@ mod tests {
         let env = TaskEnvelope {
             id: TaskId::new(),
             processor_type: "email".into(),
-            context: serde_json::value::to_raw_value(&serde_json::json!({ "to": "a@b.c" })).unwrap(),
+            context: serde_json::value::to_raw_value(&serde_json::json!({ "to": "a@b.c" }))
+                .unwrap(),
             attempt: 2,
             enqueued_at: 42,
             last_error: Some("boom".into()),
@@ -274,7 +281,11 @@ mod tests {
     fn task_decodes_both_layouts_and_reassembles_the_envelope() {
         let header = TaskHeader::new("t".into(), None);
         let context = r#"{"to":"a@b.c"}"#;
-        let split = Task::decode(serde_json::to_string(&header).unwrap(), Some(context.into())).unwrap();
+        let split = Task::decode(
+            serde_json::to_string(&header).unwrap(),
+            Some(context.into()),
+        )
+        .unwrap();
         assert_eq!((&split.header, &*split.context), (&header, context));
 
         let combined = split.to_envelope_json();

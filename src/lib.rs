@@ -17,12 +17,16 @@
 //! worker reclaims the task, so processors with side effects should be idempotent.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs, missing_debug_implementations, clippy::missing_errors_doc)]
+#![warn(
+    missing_docs,
+    missing_debug_implementations,
+    clippy::missing_errors_doc
+)]
 
 mod chain;
 mod client;
-mod error;
 mod control;
+mod error;
 mod keys;
 mod limiter;
 mod monitor;
@@ -34,10 +38,10 @@ mod worker;
 
 pub use chain::{ChainBuilder, ChainId, ChainStatus, DEFAULT_RESULT_TTL};
 pub use client::{DeadLetter, TaskQueue};
-pub use error::{BoxError, Error, Result};
 #[allow(deprecated)]
 pub use control::Heartbeat;
 pub use control::{CancelReason, TaskControl};
+pub use error::{BoxError, Error, Result};
 pub use registry::Registry;
 pub use task::{ChainLink, IntoTaskType, TaskEnvelope, TaskId, TaskType};
 pub use worker::{MIN_LEASE, Worker, WorkerConfig, WorkerHandle, WorkerStats};

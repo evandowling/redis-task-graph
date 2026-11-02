@@ -44,10 +44,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for i in 0..3 {
         queue
-            .submit("send_email", &SendEmail { to: format!("user{i}@example.com"), subject: "hello".into() })
+            .submit(
+                "send_email",
+                &SendEmail {
+                    to: format!("user{i}@example.com"),
+                    subject: "hello".into(),
+                },
+            )
             .await?;
         queue
-            .submit("resize_image", &ResizeImage { key: format!("img-{i}.png"), width: 256 })
+            .submit(
+                "resize_image",
+                &ResizeImage {
+                    key: format!("img-{i}.png"),
+                    width: 256,
+                },
+            )
             .await?;
     }
 

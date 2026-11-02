@@ -65,11 +65,13 @@ impl Limiter {
             let mut added = limit - old;
             // Cancel outstanding debt before putting new permits into circulation.
             #[allow(deprecated)] // renamed `try_update`, which Rust 1.89 lacks
-            let _ = self.debt.fetch_update(Ordering::AcqRel, Ordering::Acquire, |debt| {
-                let paid = debt.min(added);
-                added = limit - old - paid;
-                Some(debt - paid)
-            });
+            let _ = self
+                .debt
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |debt| {
+                    let paid = debt.min(added);
+                    added = limit - old - paid;
+                    Some(debt - paid)
+                });
             self.semaphore.add_permits(added);
         }
     }
@@ -179,7 +181,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiter.is_finished());
         l.set_limit(2);
-        tokio::time::timeout(Duration::from_secs(1), waiter).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -208,7 +213,13 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         drop(held);
-        assert!(l.try_acquire().is_none(), "the waiting task must get the permit");
-        tokio::time::timeout(Duration::from_secs(1), waiter).await.unwrap().unwrap();
+        assert!(
+            l.try_acquire().is_none(),
+            "the waiting task must get the permit"
+        );
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

@@ -61,10 +61,11 @@ impl Drop for Cleanup {
         else {
             return;
         };
-        let keys: Vec<String> = match redis::Commands::scan_match(&mut conn, format!("{{{}}}:*", self.ns)) {
-            Ok(keys) => keys.filter_map(Result::ok).collect(),
-            Err(_) => return,
-        };
+        let keys: Vec<String> =
+            match redis::Commands::scan_match(&mut conn, format!("{{{}}}:*", self.ns)) {
+                Ok(keys) => keys.filter_map(Result::ok).collect(),
+                Err(_) => return,
+            };
         for chunk in keys.chunks(1000) {
             let _: redis::RedisResult<()> = redis::Commands::del(&mut conn, chunk);
         }
@@ -81,7 +82,9 @@ async fn records_task_lifecycle_metrics() {
 
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
     let ns = format!("rtg-otel-{}", uuid::Uuid::new_v4());
-    let Ok(Ok(queue)) = tokio::time::timeout(Duration::from_secs(2), TaskQueue::connect(&url, &ns)).await else {
+    let Ok(Ok(queue)) =
+        tokio::time::timeout(Duration::from_secs(2), TaskQueue::connect(&url, &ns)).await
+    else {
         eprintln!("skipping: Redis not reachable at {url}");
         return;
     };
@@ -89,7 +92,8 @@ async fn records_task_lifecycle_metrics() {
 
     let mut reg = Registry::new();
     reg.register("ok", |_: u32| async { Ok(()) }).unwrap();
-    reg.register("bad", |_: u32| async { Err("nope".into()) }).unwrap();
+    reg.register("bad", |_: u32| async { Err("nope".into()) })
+        .unwrap();
     let worker = Worker::builder(queue.clone(), reg)
         .max_attempts(2)
         .backoff(Duration::from_millis(10), Duration::from_millis(10))
@@ -103,7 +107,10 @@ async fn records_task_lifecycle_metrics() {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while queue.dead_letters(1).await.unwrap().is_empty() {
-        assert!(tokio::time::Instant::now() < deadline, "bad task was not dead-lettered");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "bad task was not dead-lettered"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
@@ -113,18 +120,67 @@ async fn records_task_lifecycle_metrics() {
     let last = exports.last().expect("an export");
     worker.shutdown().await;
 
-    assert_eq!(value(last, "rtg.tasks.submitted", &[("processor_type", "ok")]), Some(1));
-    assert_eq!(value(last, "rtg.tasks.submitted", &[("processor_type", "bad")]), Some(1));
-    assert_eq!(value(last, "rtg.tasks.claimed", &[("processor_type", "bad"), ("source", "fetch")]), Some(2));
-    assert_eq!(value(last, "rtg.tasks.finished", &[("processor_type", "ok"), ("outcome", "success")]), Some(1));
-    assert_eq!(value(last, "rtg.tasks.finished", &[("processor_type", "bad"), ("outcome", "retry")]), Some(1));
-    assert_eq!(value(last, "rtg.tasks.finished", &[("processor_type", "bad"), ("outcome", "dead")]), Some(1));
-    assert_eq!(value(last, "rtg.task.run_time", &[("processor_type", "bad")]), Some(2));
-    assert_eq!(value(last, "rtg.task.queue_time", &[("processor_type", "ok")]), Some(1));
-    assert_eq!(value(last, "rtg.task.finalize_time", &[("processor_type", "ok")]), Some(1));
+    assert_eq!(
+        value(last, "rtg.tasks.submitted", &[("processor_type", "ok")]),
+        Some(1)
+    );
+    assert_eq!(
+        value(last, "rtg.tasks.submitted", &[("processor_type", "bad")]),
+        Some(1)
+    );
+    assert_eq!(
+        value(
+            last,
+            "rtg.tasks.claimed",
+            &[("processor_type", "bad"), ("source", "fetch")]
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        value(
+            last,
+            "rtg.tasks.finished",
+            &[("processor_type", "ok"), ("outcome", "success")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        value(
+            last,
+            "rtg.tasks.finished",
+            &[("processor_type", "bad"), ("outcome", "retry")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        value(
+            last,
+            "rtg.tasks.finished",
+            &[("processor_type", "bad"), ("outcome", "dead")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        value(last, "rtg.task.run_time", &[("processor_type", "bad")]),
+        Some(2)
+    );
+    assert_eq!(
+        value(last, "rtg.task.queue_time", &[("processor_type", "ok")]),
+        Some(1)
+    );
+    assert_eq!(
+        value(last, "rtg.task.finalize_time", &[("processor_type", "ok")]),
+        Some(1)
+    );
     assert!(value(last, "rtg.worker.concurrency_limit", &[]).unwrap() >= 1);
-    assert!(value(last, "rtg.worker.scheduling_lag", &[]).unwrap() >= 1, "a lag sample per live worker");
+    assert!(
+        value(last, "rtg.worker.scheduling_lag", &[]).unwrap() >= 1,
+        "a lag sample per live worker"
+    );
     let ok_stream = queue.stream_key("ok");
-    assert_eq!(value(last, "rtg.queue.depth", &[("stream", ok_stream.as_str())]).map(|_| ()), Some(()));
+    assert_eq!(
+        value(last, "rtg.queue.depth", &[("stream", ok_stream.as_str())]).map(|_| ()),
+        Some(())
+    );
     provider.shutdown().unwrap();
 }

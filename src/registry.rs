@@ -8,8 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 
-use crate::error::{BoxError, Error, Result};
 use crate::control::TaskControl;
+use crate::error::{BoxError, Error, Result};
 use crate::task::IntoTaskType;
 
 /// Why an erased handler did not succeed.
@@ -42,7 +42,11 @@ pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
 /// used, so a plain task's is never serialized; for a large output, serializing costs as much as
 /// decoding the context.
 pub(crate) type ErasedHandler = Arc<
-    dyn Fn(&str, TaskControl, bool) -> BoxFuture<'static, std::result::Result<Option<Box<RawValue>>, HandlerError>>
+    dyn Fn(
+            &str,
+            TaskControl,
+            bool,
+        ) -> BoxFuture<'static, std::result::Result<Option<Box<RawValue>>, HandlerError>>
         + Send
         + Sync,
 >;
@@ -67,7 +71,9 @@ impl std::fmt::Debug for Registry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut types: Vec<_> = self.processors.keys().collect();
         types.sort();
-        f.debug_struct("Registry").field("processor_types", &types).finish()
+        f.debug_struct("Registry")
+            .field("processor_types", &types)
+            .finish()
     }
 }
 
@@ -167,7 +173,8 @@ impl Registry {
             let context = serde_json::from_str::<In>(raw);
             let processor = processor.clone();
             Box::pin(async move {
-                let context = context.map_err(|e| HandlerError::Fatal(format!("invalid context: {e}")))?;
+                let context =
+                    context.map_err(|e| HandlerError::Fatal(format!("invalid context: {e}")))?;
                 let output = processor(context, control)
                     .await
                     .map_err(|e| HandlerError::Failed(error_chain(&*e)))?;
@@ -179,7 +186,14 @@ impl Registry {
                     .map_err(|e| HandlerError::Fatal(format!("invalid output: {e}")))
             })
         });
-        self.processors.insert(processor_type, Processor { handler, lease: None, controlled });
+        self.processors.insert(
+            processor_type,
+            Processor {
+                handler,
+                lease: None,
+                controlled,
+            },
+        );
         Ok(self)
     }
 
@@ -230,13 +244,32 @@ mod tests {
     async fn dispatches_typed_context() {
         let mut reg = Registry::new();
         reg.register("t", |ctx: Ctx| async move {
-            if ctx.n == 1 { Ok(()) } else { Err("bad n".into()) }
+            if ctx.n == 1 {
+                Ok(())
+            } else {
+                Err("bad n".into())
+            }
         })
         .unwrap();
-        let h = |v: serde_json::Value| (reg.get("t").unwrap().handler)(&v.to_string(), TaskControl::detached(), true);
-        assert_eq!(h(serde_json::json!({ "n": 1 })).await.unwrap().unwrap().get(), "null");
-        assert!(matches!(h(serde_json::json!({ "n": 2 })).await, Err(HandlerError::Failed(_))));
-        assert!(matches!(h(serde_json::json!({ "x": 1 })).await, Err(HandlerError::Fatal(_))));
+        let h = |v: serde_json::Value| {
+            (reg.get("t").unwrap().handler)(&v.to_string(), TaskControl::detached(), true)
+        };
+        assert_eq!(
+            h(serde_json::json!({ "n": 1 }))
+                .await
+                .unwrap()
+                .unwrap()
+                .get(),
+            "null"
+        );
+        assert!(matches!(
+            h(serde_json::json!({ "n": 2 })).await,
+            Err(HandlerError::Failed(_))
+        ));
+        assert!(matches!(
+            h(serde_json::json!({ "x": 1 })).await,
+            Err(HandlerError::Fatal(_))
+        ));
     }
 
     #[tokio::test]
@@ -247,7 +280,12 @@ mod tests {
         let handler = &reg.get("double").unwrap().handler;
         let output = handler("21", TaskControl::detached(), true).await.unwrap();
         assert_eq!(output.unwrap().get(), "42");
-        assert!(handler("21", TaskControl::detached(), false).await.unwrap().is_none());
+        assert!(
+            handler("21", TaskControl::detached(), false)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -256,7 +294,10 @@ mod tests {
         reg.register("t", |_: Ctx| async { Ok(()) }).unwrap();
         reg.set_lease("t", Duration::from_secs(2)).unwrap();
         assert_eq!(reg.get("t").unwrap().lease, Some(Duration::from_secs(2)));
-        assert!(matches!(reg.set_lease("missing", Duration::from_secs(2)), Err(Error::UnknownProcessor(_))));
+        assert!(matches!(
+            reg.set_lease("missing", Duration::from_secs(2)),
+            Err(Error::UnknownProcessor(_))
+        ));
     }
 
     #[test]
@@ -270,7 +311,10 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct Wrapped(&'static str, Option<Box<dyn std::error::Error + Send + Sync>>);
+    struct Wrapped(
+        &'static str,
+        Option<Box<dyn std::error::Error + Send + Sync>>,
+    );
     impl std::fmt::Display for Wrapped {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(self.0)
@@ -287,6 +331,9 @@ mod tests {
         let root = Wrapped("connection refused", None);
         let mid = Wrapped("fetch failed: connection refused", Some(Box::new(root)));
         let top = Wrapped("sync user", Some(Box::new(mid)));
-        assert_eq!(error_chain(&top), "sync user: fetch failed: connection refused");
+        assert_eq!(
+            error_chain(&top),
+            "sync user: fetch failed: connection refused"
+        );
     }
 }

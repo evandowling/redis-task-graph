@@ -68,7 +68,10 @@ mod imp {
     /// Queue samples older than this are no longer reported (their worker has stopped).
     const STALE_AFTER: Duration = Duration::from_secs(30);
 
-    const SOURCES: [(ClaimSource, &str); 2] = [(ClaimSource::Fetch, "fetch"), (ClaimSource::Reclaim, "reclaim")];
+    const SOURCES: [(ClaimSource, &str); 2] = [
+        (ClaimSource::Fetch, "fetch"),
+        (ClaimSource::Reclaim, "reclaim"),
+    ];
     const OUTCOMES: [(Finished, &str); 4] = [
         (Finished::Success, "success"),
         (Finished::Retry, "retry"),
@@ -117,7 +120,11 @@ mod imp {
                     .is_ok()
             {
                 let rate = count * 1000 / elapsed;
-                let ppm = if rate <= HISTOGRAM_BUDGET { 1_000_000 } else { HISTOGRAM_BUDGET * 1_000_000 / rate };
+                let ppm = if rate <= HISTOGRAM_BUDGET {
+                    1_000_000
+                } else {
+                    HISTOGRAM_BUDGET * 1_000_000 / rate
+                };
                 self.keep_ppm.store(ppm, Ordering::Relaxed);
                 self.window_count.store(0, Ordering::Relaxed);
             }
@@ -148,7 +155,12 @@ mod imp {
 
     pub(crate) fn handle(namespace: &str, processor_type: &str) -> TypeHandle {
         LazyLock::force(&INSTRUMENTS);
-        if let Some(m) = TYPES.read().unwrap().get(namespace).and_then(|types| types.get(processor_type)) {
+        if let Some(m) = TYPES
+            .read()
+            .unwrap()
+            .get(namespace)
+            .and_then(|types| types.get(processor_type))
+        {
             return TypeHandle(m.clone());
         }
         let mut namespaces = TYPES.write().unwrap();
@@ -189,21 +201,30 @@ mod imp {
                 let i = &*INSTRUMENTS;
                 i.queue_time.record(queue.as_secs_f64(), &self.0.attrs);
                 i.run_time.record(run.as_secs_f64(), &self.0.attrs);
-                i.finalize_time.record(finalize.as_secs_f64(), &self.0.attrs);
+                i.finalize_time
+                    .record(finalize.as_secs_f64(), &self.0.attrs);
             }
         }
     }
 
     pub(crate) fn task_submitted(namespace: &str, processor_type: &str) {
-        handle(namespace, processor_type).0.submitted.fetch_add(1, Ordering::Relaxed);
+        handle(namespace, processor_type)
+            .0
+            .submitted
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn chain_submitted(namespace: &str, first_type: &str) {
-        handle(namespace, first_type).0.chains_submitted.fetch_add(1, Ordering::Relaxed);
+        handle(namespace, first_type)
+            .0
+            .chains_submitted
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn lease_lost(stream: &str) {
-        INSTRUMENTS.leases_lost.add(1, &[KeyValue::new("stream", stream.to_owned())]);
+        INSTRUMENTS
+            .leases_lost
+            .add(1, &[KeyValue::new("stream", stream.to_owned())]);
     }
 
     struct Instruments {
@@ -231,10 +252,16 @@ mod imp {
 
     /// Latest sampled queue sizes by stream, and delayed-retry counts by retry set.
     static QUEUES: LazyLock<Mutex<HashMap<String, QueueSample>>> = LazyLock::new(Default::default);
-    static DELAYED: LazyLock<Mutex<HashMap<String, (u64, Instant)>>> = LazyLock::new(Default::default);
+    static DELAYED: LazyLock<Mutex<HashMap<String, (u64, Instant)>>> =
+        LazyLock::new(Default::default);
 
     /// An observable counter reporting `read(type)` for each processor type.
-    fn type_counter(meter: &Meter, name: &'static str, description: &'static str, read: fn(&TypeMetrics) -> u64) -> ObservableCounter<u64> {
+    fn type_counter(
+        meter: &Meter,
+        name: &'static str,
+        description: &'static str,
+        read: fn(&TypeMetrics) -> u64,
+    ) -> ObservableCounter<u64> {
         meter
             .u64_observable_counter(name)
             .with_description(description)
@@ -261,7 +288,11 @@ mod imp {
             .with_callback(move |observer| {
                 for m in TYPES.read().unwrap().values().flat_map(HashMap::values) {
                     for (i, (_, value)) in values.iter().enumerate() {
-                        let attrs = [m.attrs[0].clone(), m.attrs[1].clone(), KeyValue::new(label, *value)];
+                        let attrs = [
+                            m.attrs[0].clone(),
+                            m.attrs[1].clone(),
+                            KeyValue::new(label, *value),
+                        ];
                         observer.observe(read(m)[i].load(Ordering::Relaxed), &attrs);
                     }
                 }
@@ -269,23 +300,36 @@ mod imp {
             .build()
     }
 
-    fn worker_gauge(meter: &Meter, name: &'static str, description: &'static str, read: fn(&Monitored) -> u64) -> ObservableGauge<u64> {
+    fn worker_gauge(
+        meter: &Meter,
+        name: &'static str,
+        description: &'static str,
+        read: fn(&Monitored) -> u64,
+    ) -> ObservableGauge<u64> {
         meter
             .u64_observable_gauge(name)
             .with_description(description)
             .with_callback(move |observer| {
-                WORKERS.lock().unwrap().retain(|(worker, m)| match m.upgrade() {
-                    Some(m) => {
-                        observer.observe(read(&m), &[KeyValue::new("worker", worker.clone())]);
-                        true
-                    }
-                    None => false,
-                });
+                WORKERS
+                    .lock()
+                    .unwrap()
+                    .retain(|(worker, m)| match m.upgrade() {
+                        Some(m) => {
+                            observer.observe(read(&m), &[KeyValue::new("worker", worker.clone())]);
+                            true
+                        }
+                        None => false,
+                    });
             })
             .build()
     }
 
-    fn queue_gauge(meter: &Meter, name: &'static str, description: &'static str, read: fn(&QueueSample) -> u64) -> ObservableGauge<u64> {
+    fn queue_gauge(
+        meter: &Meter,
+        name: &'static str,
+        description: &'static str,
+        read: fn(&QueueSample) -> u64,
+    ) -> ObservableGauge<u64> {
         meter
             .u64_observable_gauge(name)
             .with_description(description)
@@ -308,38 +352,79 @@ mod imp {
                 .with_unit("s")
                 .with_description(description)
                 .with_boundaries(vec![
-                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+                    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                    10.0, 30.0,
                 ])
                 .build()
         };
         Instruments {
-            queue_time: seconds("rtg.task.queue_time", "Time from submission to the processor starting (sampled)"),
+            queue_time: seconds(
+                "rtg.task.queue_time",
+                "Time from submission to the processor starting (sampled)",
+            ),
             run_time: seconds("rtg.task.run_time", "Processor run time (sampled)"),
-            finalize_time: seconds("rtg.task.finalize_time", "Time to record a task's outcome in Redis (sampled)"),
+            finalize_time: seconds(
+                "rtg.task.finalize_time",
+                "Time to record a task's outcome in Redis (sampled)",
+            ),
             leases_lost: meter
                 .u64_counter("rtg.leases.lost")
                 .with_description("Leases lost to another worker while held")
                 .build(),
             _counters: vec![
-                type_counter(&meter, "rtg.tasks.submitted", "Tasks submitted", |m| m.submitted.load(Ordering::Relaxed)),
+                type_counter(&meter, "rtg.tasks.submitted", "Tasks submitted", |m| {
+                    m.submitted.load(Ordering::Relaxed)
+                }),
                 type_counter(&meter, "rtg.chains.submitted", "Chains submitted", |m| {
                     m.chains_submitted.load(Ordering::Relaxed)
                 }),
-                labelled_counter(&meter, "rtg.tasks.claimed", "Tasks claimed by workers", "source", SOURCES, |m| &m.claimed),
-                labelled_counter(&meter, "rtg.tasks.finished", "Task executions by outcome", "outcome", OUTCOMES, |m| {
-                    &m.finished
-                }),
-                labelled_counter(&meter, "rtg.chain.steps", "Chain step transitions", "event", EVENTS, |m| &m.chain_steps),
+                labelled_counter(
+                    &meter,
+                    "rtg.tasks.claimed",
+                    "Tasks claimed by workers",
+                    "source",
+                    SOURCES,
+                    |m| &m.claimed,
+                ),
+                labelled_counter(
+                    &meter,
+                    "rtg.tasks.finished",
+                    "Task executions by outcome",
+                    "outcome",
+                    OUTCOMES,
+                    |m| &m.finished,
+                ),
+                labelled_counter(
+                    &meter,
+                    "rtg.chain.steps",
+                    "Chain step transitions",
+                    "event",
+                    EVENTS,
+                    |m| &m.chain_steps,
+                ),
             ],
             _gauges: vec![
-                worker_gauge(&meter, "rtg.worker.concurrency_limit", "Current adaptive concurrency limit", |m| {
-                    m.stats().concurrency_limit as u64
+                worker_gauge(
+                    &meter,
+                    "rtg.worker.concurrency_limit",
+                    "Current adaptive concurrency limit",
+                    |m| m.stats().concurrency_limit as u64,
+                ),
+                worker_gauge(
+                    &meter,
+                    "rtg.worker.in_flight",
+                    "Tasks holding a concurrency permit",
+                    |m| m.stats().in_flight as u64,
+                ),
+                queue_gauge(&meter, "rtg.queue.depth", "Entries in the stream", |s| {
+                    s.depth
                 }),
-                worker_gauge(&meter, "rtg.worker.in_flight", "Tasks holding a concurrency permit", |m| {
-                    m.stats().in_flight as u64
-                }),
-                queue_gauge(&meter, "rtg.queue.depth", "Entries in the stream", |s| s.depth),
-                queue_gauge(&meter, "rtg.queue.pending", "Claimed entries not yet acknowledged", |s| s.pending),
+                queue_gauge(
+                    &meter,
+                    "rtg.queue.pending",
+                    "Claimed entries not yet acknowledged",
+                    |s| s.pending,
+                ),
                 meter
                     .u64_observable_gauge("rtg.queue.delayed")
                     .with_description("Tasks waiting for a retry")
@@ -375,12 +460,19 @@ mod imp {
     }
 
     pub(crate) fn record_queue(stream: &str, depth: u64, pending: u64) {
-        let sample = QueueSample { depth, pending, at: Instant::now() };
+        let sample = QueueSample {
+            depth,
+            pending,
+            at: Instant::now(),
+        };
         QUEUES.lock().unwrap().insert(stream.to_owned(), sample);
     }
 
     pub(crate) fn record_delayed(set: &str, delayed: u64) {
-        DELAYED.lock().unwrap().insert(set.to_owned(), (delayed, Instant::now()));
+        DELAYED
+            .lock()
+            .unwrap()
+            .insert(set.to_owned(), (delayed, Instant::now()));
     }
 
     #[cfg(test)]
@@ -391,9 +483,13 @@ mod imp {
         fn sampler_keeps_everything_under_budget_and_thins_above_it() {
             let s = Sampler::new();
             s.window_start_ms.store(0, Ordering::Relaxed);
-            assert!((0..100).all(|_| s.keep_at(10)), "the first window keeps everything");
+            assert!(
+                (0..100).all(|_| s.keep_at(10)),
+                "the first window keeps everything"
+            );
             // A full one-second window at 10x the budget.
-            s.window_count.store(HISTOGRAM_BUDGET * 10 - 1, Ordering::Relaxed);
+            s.window_count
+                .store(HISTOGRAM_BUDGET * 10 - 1, Ordering::Relaxed);
             s.keep_at(1000);
             let ppm = s.keep_ppm.load(Ordering::Relaxed);
             assert!((90_000..=110_000).contains(&ppm), "keeps ~10%: {ppm} ppm");
@@ -409,9 +505,18 @@ mod imp {
             a.finished(Finished::Success);
             b.finished(Finished::Success);
             other.finished(Finished::Success);
-            assert_eq!(a.0.finished[Finished::Success as usize].load(Ordering::Relaxed), 2);
-            assert_eq!(other.0.finished[Finished::Success as usize].load(Ordering::Relaxed), 1);
-            assert_eq!(other.0.attrs[0], KeyValue::new("namespace", "telemetry-test-other-ns"));
+            assert_eq!(
+                a.0.finished[Finished::Success as usize].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                other.0.finished[Finished::Success as usize].load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                other.0.attrs[0],
+                KeyValue::new("namespace", "telemetry-test-other-ns")
+            );
         }
     }
 }

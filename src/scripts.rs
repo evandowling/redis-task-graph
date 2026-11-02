@@ -195,16 +195,36 @@ mod tests {
         };
         let stream = format!("{{rtg-test-{}}}:stream:t", uuid::Uuid::new_v4());
         let _: () = redis::cmd("XGROUP")
-            .arg("CREATE").arg(&stream).arg("g").arg("$").arg("MKSTREAM")
+            .arg("CREATE")
+            .arg(&stream)
+            .arg("g")
+            .arg("$")
+            .arg("MKSTREAM")
             .query(&mut conn)
             .unwrap();
-        let id: String = redis::cmd("XADD").arg(&stream).arg("*").arg("f").arg("v").query(&mut conn).unwrap();
+        let id: String = redis::cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg("f")
+            .arg("v")
+            .query(&mut conn)
+            .unwrap();
         let _: redis::Value = redis::cmd("XREADGROUP")
-            .arg("GROUP").arg("g").arg("a").arg("STREAMS").arg(&stream).arg(">")
+            .arg("GROUP")
+            .arg("g")
+            .arg("a")
+            .arg("STREAMS")
+            .arg(&stream)
+            .arg(">")
             .query(&mut conn)
             .unwrap();
         let ack = |conn: &mut redis::Connection, consumer: &str| -> i64 {
-            ACK.key(&stream).arg("g").arg(&id).arg(consumer).invoke(conn).unwrap()
+            ACK.key(&stream)
+                .arg("g")
+                .arg(&id)
+                .arg(consumer)
+                .invoke(conn)
+                .unwrap()
         };
 
         assert_eq!(ack(&mut conn, "b"), 0, "owned by another consumer");

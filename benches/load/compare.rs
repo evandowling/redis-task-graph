@@ -50,7 +50,13 @@ fn paired<'a>(current: &'a Figure, other: &'a Figure) -> Vec<(&'a Series, &'a Se
         .series
         .iter()
         .filter(|s| s.is_primary())
-        .filter_map(|s| other.series.iter().find(|o| o.name == s.name).map(|o| (s, o)))
+        .filter_map(|s| {
+            other
+                .series
+                .iter()
+                .find(|o| o.name == s.name)
+                .map(|o| (s, o))
+        })
         .collect()
 }
 
@@ -74,13 +80,21 @@ fn noise(baseline: &Figure, aa: &Figure) -> f64 {
 
 fn compare_figure(current: &Figure, baseline: &Figure, aa: Option<&Figure>) -> FigureChange {
     let noise = aa.map(|a| noise(baseline, a)).unwrap_or(0.0);
-    let floor = if current.y_format == Format::Percent { MIN_THRESHOLD_POINTS } else { MIN_THRESHOLD_PCT };
+    let floor = if current.y_format == Format::Percent {
+        MIN_THRESHOLD_POINTS
+    } else {
+        MIN_THRESHOLD_PCT
+    };
     let threshold = floor.max(2.0 * noise);
     let mut points = Vec::new();
     for (cur, base) in paired(current, baseline) {
         for (c, b) in cur.points.iter().zip(&base.points) {
             let delta = change(b.1, c.1, current.y_format);
-            let goodness = if current.higher_is_better { delta } else { -delta };
+            let goodness = if current.higher_is_better {
+                delta
+            } else {
+                -delta
+            };
             let verdict = if goodness < -threshold {
                 Verdict::Regression
             } else if goodness > threshold {
@@ -98,7 +112,12 @@ fn compare_figure(current: &Figure, baseline: &Figure, aa: Option<&Figure>) -> F
             });
         }
     }
-    FigureChange { figure: current.clone(), noise, threshold, points }
+    FigureChange {
+        figure: current.clone(),
+        noise,
+        threshold,
+        points,
+    }
 }
 
 /// A chart of the current run's series with the baseline drawn dashed in matching colors.
@@ -121,7 +140,11 @@ fn overlay(current: &Figure, baseline: &Figure) -> Figure {
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = values.len();
-    if n % 2 == 1 { values[n / 2] } else { (values[n / 2 - 1] + values[n / 2]) / 2.0 }
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    }
 }
 
 /// Pointwise median of several runs of one figure, pairing points by position.
@@ -133,8 +156,14 @@ pub fn median_figure(runs: &[Figure]) -> Option<Figure> {
             .filter_map(|f| f.series.iter().find(|s| s.name == series.name))
             .collect();
         for (i, point) in series.points.iter_mut().enumerate() {
-            let at: Vec<(f64, f64)> = others.iter().filter_map(|s| s.points.get(i).copied()).collect();
-            *point = (median(at.iter().map(|p| p.0).collect()), median(at.iter().map(|p| p.1).collect()));
+            let at: Vec<(f64, f64)> = others
+                .iter()
+                .filter_map(|s| s.points.get(i).copied())
+                .collect();
+            *point = (
+                median(at.iter().map(|p| p.0).collect()),
+                median(at.iter().map(|p| p.1).collect()),
+            );
         }
     }
     merged.subtitle = format!("{} (median of {} runs)", merged.subtitle, runs.len());
@@ -147,7 +176,11 @@ fn load(dir: &Path, id: &str) -> Option<Figure> {
 }
 
 fn unit(format: Format) -> &'static str {
-    if format == Format::Percent { " pts" } else { "%" }
+    if format == Format::Percent {
+        " pts"
+    } else {
+        "%"
+    }
 }
 
 fn signed(v: f64, format: Format) -> String {
@@ -202,7 +235,10 @@ pub fn run(
         );
     }
     if !new_figures.is_empty() {
-        md += &format!("\nNew figures without a baseline: {}.\n", new_figures.join(", "));
+        md += &format!(
+            "\nNew figures without a baseline: {}.\n",
+            new_figures.join(", ")
+        );
     }
 
     for c in &changes {
@@ -212,7 +248,10 @@ pub fn run(
             "![{} before and after](graphs/compare_{}.svg)\n\n",
             f.title, f.id
         );
-        md += &format!("| Series | {} | Before | After | Change (+ is better) | Verdict |\n", f.x_label);
+        md += &format!(
+            "| Series | {} | Before | After | Change (+ is better) | Verdict |\n",
+            f.x_label
+        );
         md += "|---|---:|---:|---:|---:|---|\n";
         for p in &c.points {
             let verdict = match p.verdict {

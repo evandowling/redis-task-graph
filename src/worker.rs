@@ -5,16 +5,18 @@ use std::time::Duration;
 
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
-use redis::streams::{StreamAutoClaimReply, StreamId, StreamPendingCountReply, StreamReadOptions, StreamReadReply};
+use redis::streams::{
+    StreamAutoClaimReply, StreamId, StreamPendingCountReply, StreamReadOptions, StreamReadReply,
+};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::client::TaskQueue;
+use crate::control::{CancelReason, Liveness, TaskControl};
 use crate::error::{Error, Result};
 use crate::keys::Keys;
-use crate::control::{CancelReason, Liveness, TaskControl};
 use crate::limiter::{Limiter, Permit};
 use crate::monitor::{LeaseGuard, Monitor, MonitorConfig, Monitored};
 use crate::registry::{HandlerError, Registry};
@@ -138,7 +140,11 @@ impl WorkerConfig {
             ("promote_interval", self.promote_interval),
         ];
         let lag = self.max_scheduling_lag.map(|d| ("max_scheduling_lag", d));
-        if let Some((name, d)) = durations.into_iter().chain(lag).find(|(_, d)| *d > MAX_SETTING) {
+        if let Some((name, d)) = durations
+            .into_iter()
+            .chain(lag)
+            .find(|(_, d)| *d > MAX_SETTING)
+        {
             return invalid(format!("{name} is {d:?}; the maximum is {MAX_SETTING:?}"));
         }
         if self.probe_interval.is_zero() {
@@ -324,7 +330,11 @@ impl Worker {
         let legacy = Arc::new(keys.legacy());
         let mut layouts: Vec<(String, String, Arc<Keys>)> = Vec::new();
         for processor_type in self.registry.processor_types() {
-            layouts.push((keys.stream(processor_type), processor_type.to_owned(), keys.clone()));
+            layouts.push((
+                keys.stream(processor_type),
+                processor_type.to_owned(),
+                keys.clone(),
+            ));
             let old = legacy.stream(processor_type);
             if conn.exists::<_, bool>(&old).await? {
                 info!(stream = old, "reading a 0.1 stream until it is drained");
@@ -365,7 +375,10 @@ impl Worker {
         // With pushback, start at the runtime's thread count and let slow start find the limit.
         let initial = if config.adaptive_concurrency {
             let threads = tokio::runtime::Handle::current().metrics().num_workers();
-            threads.clamp(config.min_concurrency, config.concurrency.max(config.min_concurrency))
+            threads.clamp(
+                config.min_concurrency,
+                config.concurrency.max(config.min_concurrency),
+            )
         } else {
             config.concurrency
         };
@@ -418,7 +431,9 @@ impl Worker {
                 }
             }
             // Nothing new is claimed now; ask processors still running to stop.
-            supervisor_inner.monitored.cancel_all(CancelReason::Shutdown);
+            supervisor_inner
+                .monitored
+                .cancel_all(CancelReason::Shutdown);
             supervisor_inner.wait_idle().await;
             remove_consumer(&supervisor_inner).await;
             // In-flight tasks are done, so no leases remain to renew.
@@ -625,7 +640,10 @@ async fn remove_consumer(inner: &Inner) {
             .await;
         match removed {
             Ok(1) => {}
-            Ok(_) => debug!(stream, "consumer still has pending entries; leaving it in the group"),
+            Ok(_) => debug!(
+                stream,
+                "consumer still has pending entries; leaving it in the group"
+            ),
             Err(e) => debug!(stream, error = %e, "failed to remove consumer from the group"),
         }
     }
@@ -678,9 +696,22 @@ fn dispatch(
     let dispatched_at = std::time::Instant::now();
     // Start renewing the lease now, at claim time: the task may wait in the run queue for longer
     // than the lease when the runtime is saturated.
-    let lease = inner.monitored.hold_lease(info.index, &entry.id, info.lease);
-    let claim = Claim { stream, entry, deliveries };
-    tokio::spawn(process(inner.clone(), claim, permit, guard, dispatched_at, lease));
+    let lease = inner
+        .monitored
+        .hold_lease(info.index, &entry.id, info.lease);
+    let claim = Claim {
+        stream,
+        entry,
+        deliveries,
+    };
+    tokio::spawn(process(
+        inner.clone(),
+        claim,
+        permit,
+        guard,
+        dispatched_at,
+        lease,
+    ));
 }
 
 async fn fetch_loop(
@@ -691,7 +722,9 @@ async fn fetch_loop(
     let ids = vec![">"; inner.streams.len()];
     let block_ms = inner.config.block.as_millis() as usize;
     while !stopping(&shutdown) {
-        let Some(mut permits) = inner.acquire_batch(inner.config.batch_size, &mut shutdown).await
+        let Some(mut permits) = inner
+            .acquire_batch(inner.config.batch_size, &mut shutdown)
+            .await
         else {
             break;
         };
@@ -748,7 +781,11 @@ async fn reclaim_loop(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
         .map(|s| (start + interval(s), "0-0".to_owned()))
         .collect();
     loop {
-        let next = state.iter().map(|(due, _)| *due).min().expect("a worker has at least one stream");
+        let next = state
+            .iter()
+            .map(|(due, _)| *due)
+            .min()
+            .expect("a worker has at least one stream");
         tokio::select! {
             _ = tokio::time::sleep_until(next) => {}
             _ = shutdown.changed() => return,
@@ -805,7 +842,14 @@ async fn reclaim_stream(
         for (entry, deliveries) in reply.claimed.into_iter().zip(deliveries) {
             debug!(stream, id = %entry.id, deliveries, "reclaimed expired task");
             info.metrics.claimed(ClaimSource::Reclaim);
-            dispatch(inner, stream.to_owned(), entry, permits.pop(), deliveries, info);
+            dispatch(
+                inner,
+                stream.to_owned(),
+                entry,
+                permits.pop(),
+                deliveries,
+                info,
+            );
         }
         // XAUTOCLAIM returns 0-0 once it has scanned to the end of the pending list.
         *cursor = reply.next_stream_id;
@@ -829,7 +873,12 @@ async fn delivery_counts(
     }
     let mut pipe = redis::pipe();
     for entry in claimed {
-        pipe.cmd("XPENDING").arg(stream).arg(&inner.group).arg(&entry.id).arg(&entry.id).arg(1);
+        pipe.cmd("XPENDING")
+            .arg(stream)
+            .arg(&inner.group)
+            .arg(&entry.id)
+            .arg(&entry.id)
+            .arg(1);
     }
     match pipe.query_async::<Vec<StreamPendingCountReply>>(conn).await {
         Ok(replies) => replies
@@ -850,12 +899,18 @@ async fn sample_queues(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
     const INTERVAL: Duration = Duration::from_secs(5);
     let mut conn = inner.queue.conn.clone();
     // Every retry set this worker's streams use: one per type, plus the 0.1 shared set.
-    let delayed_keys: std::collections::BTreeSet<&str> =
-        inner.per_stream.values().map(|info| info.delayed.as_str()).collect();
+    let delayed_keys: std::collections::BTreeSet<&str> = inner
+        .per_stream
+        .values()
+        .map(|info| info.delayed.as_str())
+        .collect();
     loop {
         let mut pipe = redis::pipe();
         for stream in &inner.streams {
-            pipe.xlen(stream).cmd("XPENDING").arg(stream).arg(&inner.group);
+            pipe.xlen(stream)
+                .cmd("XPENDING")
+                .arg(stream)
+                .arg(&inner.group);
         }
         for key in &delayed_keys {
             pipe.zcard(*key);
@@ -868,7 +923,11 @@ async fn sample_queues(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
                     // XPENDING's summary form starts with the total number of pending entries.
                     let pending: u64 = redis::from_redis_value_ref::<Vec<redis::Value>>(&pair[1])
                         .ok()
-                        .and_then(|summary| summary.first().and_then(|v| redis::from_redis_value_ref(v).ok()))
+                        .and_then(|summary| {
+                            summary
+                                .first()
+                                .and_then(|v| redis::from_redis_value_ref(v).ok())
+                        })
                         .unwrap_or(0);
                     telemetry::record_queue(stream, depth, pending);
                 }
@@ -902,7 +961,11 @@ async fn promote_loop(inner: Arc<Inner>, mut shutdown: watch::Receiver<bool>) {
         for &(delayed, stream) in &targets {
             let promote = || {
                 let mut invocation = scripts::PROMOTE.prepare_invoke();
-                invocation.key(delayed).key(stream).arg(LIMIT).arg(PAYLOAD_FIELD);
+                invocation
+                    .key(delayed)
+                    .key(stream)
+                    .arg(LIMIT)
+                    .arg(PAYLOAD_FIELD);
                 invocation
             };
             promote_all(&mut conn, promote, LIMIT).await;
@@ -978,9 +1041,18 @@ async fn process(
         None => inner.limiter().acquire().await,
     };
 
-    let Claim { stream, mut entry, deliveries } = claim;
+    let Claim {
+        stream,
+        mut entry,
+        deliveries,
+    } = claim;
     // Taken rather than copied: the context may be large.
-    let mut take = |field| entry.map.remove(field).and_then(|v| redis::FromRedisValue::from_redis_value(v).ok());
+    let mut take = |field| {
+        entry
+            .map
+            .remove(field)
+            .and_then(|v| redis::FromRedisValue::from_redis_value(v).ok())
+    };
     let (payload, context) = (take(PAYLOAD_FIELD).unwrap_or_default(), take(CONTEXT_FIELD));
     let id = &entry.id;
     let metrics = inner.metrics(&stream);
@@ -996,7 +1068,10 @@ async fn process(
             let queue_time = Duration::from_millis(since_submit);
             let started = std::time::Instant::now();
             let outcome = if abandoned > 0 && envelope.attempt >= inner.config.max_attempts {
-                error!(stream, id, deliveries, "dead-lettering task whose deliveries never finished");
+                error!(
+                    stream,
+                    id, deliveries, "dead-lettering task whose deliveries never finished"
+                );
                 Outcome::Fatal(format!(
                     "delivered {deliveries} times without an outcome being recorded; workers \
                      crashed or stalled while running it"
@@ -1017,7 +1092,8 @@ async fn process(
             error!(stream, id, error = %e, "dead-lettering undecodable entry");
             let err = format!("invalid task payload: {e}");
             let raw = serde_json::json!({ "raw": payload, "last_error": err }).to_string();
-            let finalized = retry_or_dead_raw(&inner, &stream, id, "dead", raw, Duration::ZERO, None).await;
+            let finalized =
+                retry_or_dead_raw(&inner, &stream, id, "dead", raw, Duration::ZERO, None).await;
             (finalized, (Finished::Dead, None))
         }
     };
@@ -1031,19 +1107,30 @@ async fn process(
         }
         Ok(_) => {
             metrics.finished(Finished::LeaseLost);
-            warn!(stream, id, "lease lost before task was finalized; another worker owns it");
+            warn!(
+                stream,
+                id, "lease lost before task was finalized; another worker owns it"
+            );
         }
         Err(e) => error!(stream, id, error = %e, "failed to finalize task; it will be redelivered"),
     }
 }
 
 /// How a task's outcome will be reported once `finalize` has recorded it.
-fn classify(outcome: &Outcome, env: &TaskHeader, max_attempts: u32) -> (Finished, Option<ChainEvent>) {
+fn classify(
+    outcome: &Outcome,
+    env: &TaskHeader,
+    max_attempts: u32,
+) -> (Finished, Option<ChainEvent>) {
     let failed_chain = env.chain.as_ref().map(|_| ChainEvent::Failed);
     match outcome {
         Outcome::Succeeded(_) => {
             let event = env.chain.as_ref().map(|link| {
-                if link.remaining.is_empty() { ChainEvent::Completed } else { ChainEvent::Advanced }
+                if link.remaining.is_empty() {
+                    ChainEvent::Completed
+                } else {
+                    ChainEvent::Advanced
+                }
             });
             (Finished::Success, event)
         }
@@ -1146,7 +1233,8 @@ async fn succeed(
     );
     let next_header = serde_json::to_string(&next).expect("header serializes");
     let next_stream = keys.stream(next_type);
-    let (chain_key, next_stream, next_header, next_context) = (&chain_key, &next_stream, &next_header, output.get());
+    let (chain_key, next_stream, next_header, next_context) =
+        (&chain_key, &next_stream, &next_header, output.get());
     with_retries(conn, |mut conn| async move {
         scripts::ADVANCE
             .key(stream)
@@ -1200,7 +1288,9 @@ async fn run(inner: &Inner, task: &Task, stream: &str, liveness: &Arc<Liveness>)
         Err(join) if join.is_cancelled() => {
             let lease = inner.lease(stream);
             warn!(task = %envelope.id, ?lease, "no heartbeat for a whole lease; processor aborted");
-            Outcome::Failed(format!("processor sent no heartbeat for {lease:?} and was aborted"))
+            Outcome::Failed(format!(
+                "processor sent no heartbeat for {lease:?} and was aborted"
+            ))
         }
         Err(join) => Outcome::Failed(panic_message(join)),
     }
@@ -1353,7 +1443,9 @@ mod tests {
             ("block", |c| c.block = Duration::ZERO),
             ("probe_interval", |c| c.probe_interval = Duration::ZERO),
             ("promote_interval", |c| c.promote_interval = Duration::ZERO),
-            ("backoff_base", |c| c.backoff_base = Duration::from_secs(600)),
+            ("backoff_base", |c| {
+                c.backoff_base = Duration::from_secs(600)
+            }),
             ("lease", |c| c.probe_interval = Duration::from_secs(5)),
             ("lease", |c| c.lease = Duration::MAX),
         ];
@@ -1361,7 +1453,9 @@ mod tests {
             let mut config = WorkerConfig::default();
             break_it(&mut config);
             match config.validate() {
-                Err(Error::InvalidConfig(msg)) => assert!(msg.contains(setting), "{setting}: {msg}"),
+                Err(Error::InvalidConfig(msg)) => {
+                    assert!(msg.contains(setting), "{setting}: {msg}")
+                }
                 other => panic!("{setting}: expected InvalidConfig, got {other:?}"),
             }
         }
@@ -1372,7 +1466,10 @@ mod tests {
         assert!(!may_evict("0", "allkeys-lru"), "no memory limit");
         assert!(!may_evict("1073741824", "noeviction"));
         assert!(may_evict("1073741824", "allkeys-lru"));
-        assert!(may_evict("1073741824", "volatile-ttl"), "chain state has a TTL");
+        assert!(
+            may_evict("1073741824", "volatile-ttl"),
+            "chain state has a TTL"
+        );
         assert!(!may_evict("", ""), "unknown settings don't warn");
     }
 }

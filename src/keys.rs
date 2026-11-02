@@ -15,12 +15,20 @@ pub(crate) struct Keys {
 impl Keys {
     pub(crate) fn new(ns: impl Into<String>) -> Self {
         let ns = ns.into();
-        Self { prefix: format!("{{{ns}}}"), ns, legacy: false }
+        Self {
+            prefix: format!("{{{ns}}}"),
+            ns,
+            legacy: false,
+        }
     }
 
     /// The 0.1 layout for the same namespace.
     pub(crate) fn legacy(&self) -> Self {
-        Self { ns: self.ns.clone(), prefix: self.ns.clone(), legacy: true }
+        Self {
+            ns: self.ns.clone(),
+            prefix: self.ns.clone(),
+            legacy: true,
+        }
     }
 
     pub(crate) fn is_legacy(&self) -> bool {

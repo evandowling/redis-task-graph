@@ -64,8 +64,14 @@ impl DeadLetter {
                     last_error: String,
                 }
                 match serde_json::from_str::<Raw>(&payload) {
-                    Ok(raw) => Self::Undecodable { payload: raw.raw, error: raw.last_error },
-                    Err(_) => Self::Undecodable { payload, error: format!("invalid task payload: {e}") },
+                    Ok(raw) => Self::Undecodable {
+                        payload: raw.raw,
+                        error: raw.last_error,
+                    },
+                    Err(_) => Self::Undecodable {
+                        payload,
+                        error: format!("invalid task payload: {e}"),
+                    },
                 }
             }
         }
@@ -152,7 +158,10 @@ impl TaskQueue {
             .xadd(
                 self.keys.stream(&header.processor_type),
                 "*",
-                &[(PAYLOAD_FIELD, head.as_str()), (CONTEXT_FIELD, context.as_str())],
+                &[
+                    (PAYLOAD_FIELD, head.as_str()),
+                    (CONTEXT_FIELD, context.as_str()),
+                ],
             )
             .await?;
         crate::telemetry::task_submitted(self.namespace(), &header.processor_type);
@@ -205,10 +214,13 @@ impl TaskQueue {
         chain: &ChainId<Out>,
     ) -> Result<Option<ChainStatus<Out>>> {
         let mut conn = self.conn.clone();
-        let mut fields: HashMap<String, String> = conn.hgetall(self.keys.chain(&chain.uuid())).await?;
+        let mut fields: HashMap<String, String> =
+            conn.hgetall(self.keys.chain(&chain.uuid())).await?;
         if fields.is_empty() {
             // A chain submitted by 0.1 keeps its status under the 0.1 key.
-            fields = conn.hgetall(self.keys.legacy().chain(&chain.uuid())).await?;
+            fields = conn
+                .hgetall(self.keys.legacy().chain(&chain.uuid()))
+                .await?;
         }
         parse_status(fields)
     }
@@ -269,6 +281,9 @@ impl TaskQueue {
     ) -> Result<ConnectionManager> {
         let config = ConnectionManagerConfig::new()
             .set_response_timeout(Some(block + std::time::Duration::from_secs(5)));
-        Ok(self.client.get_connection_manager_with_config(config).await?)
+        Ok(self
+            .client
+            .get_connection_manager_with_config(config)
+            .await?)
     }
 }
