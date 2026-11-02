@@ -104,7 +104,7 @@ impl<Out> ChainStatus<Out> {
 pub struct ChainBuilder<'q, Out> {
     queue: &'q TaskQueue,
     first: String,
-    input: serde_json::Result<serde_json::Value>,
+    input: serde_json::Result<Box<serde_json::value::RawValue>>,
     rest: Vec<String>,
     result_ttl: Duration,
     _out: PhantomData<fn() -> Out>,
@@ -126,7 +126,7 @@ impl<'q, Out> ChainBuilder<'q, Out> {
         Self {
             queue,
             first,
-            input: serde_json::to_value(input),
+            input: serde_json::value::to_raw_value(input),
             rest: Vec::new(),
             result_ttl: DEFAULT_RESULT_TTL,
             _out: PhantomData,

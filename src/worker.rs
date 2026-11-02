@@ -943,7 +943,7 @@ async fn promote_all<'a>(
 }
 
 enum Outcome {
-    Succeeded(serde_json::Value),
+    Succeeded(Box<serde_json::value::RawValue>),
     Failed(String),
     /// Not retryable: dead-letter immediately.
     Fatal(String),
@@ -1093,7 +1093,7 @@ async fn succeed(
     stream: &str,
     id: &str,
     env: TaskEnvelope,
-    output: serde_json::Value,
+    output: Box<serde_json::value::RawValue>,
 ) -> redis::RedisResult<i64> {
     // Finalize in the layout the task was claimed from, so a 0.1 chain stays in the 0.1 layout.
     let keys = &inner.per_stream[stream].keys;
@@ -1113,8 +1113,7 @@ async fn succeed(
     let chain_key = keys.chain(&link.chain_id);
 
     let Some((next_type, rest)) = link.remaining.split_first() else {
-        let output = output.to_string();
-        let (chain_key, output) = (&chain_key, &output);
+        let (chain_key, output) = (&chain_key, output.get());
         return with_retries(conn, |mut conn| async move {
             scripts::COMPLETE
                 .key(stream)
@@ -1172,7 +1171,7 @@ async fn run(inner: &Inner, envelope: &TaskEnvelope, stream: &str, liveness: &Ar
         ));
     };
     let control = TaskControl::new(liveness.clone());
-    let task = tokio::spawn((processor.handler)(envelope.context.clone(), control));
+    let task = tokio::spawn((processor.handler)(&envelope.context, control));
     let joined = if processor.controlled {
         // The monitor aborts the task if it stops sending heartbeats.
         liveness.set_abort(task.abort_handle());

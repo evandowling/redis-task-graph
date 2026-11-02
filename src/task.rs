@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::fmt;
 use std::marker::PhantomData;
 use uuid::Uuid;
@@ -89,15 +90,20 @@ impl fmt::Display for TaskId {
 }
 
 /// The serialized form of a task as stored in Redis.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Envelopes compare equal when their contexts have the same JSON text, so two contexts that
+/// differ only in formatting or key order are not equal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TaskEnvelope {
     /// Assigned at submission; kept across retries.
     pub id: TaskId,
     /// Which processor runs this task.
     pub processor_type: String,
-    /// The serialized input passed to the processor.
-    pub context: serde_json::Value,
+    /// The processor's input as JSON text, kept as-is rather than parsed, so a task's context is
+    /// decoded once, straight into the processor's type. Decode it yourself with
+    /// `serde_json::from_str(context.get())`.
+    pub context: Box<RawValue>,
     /// Number of previous failed attempts.
     #[serde(default)]
     pub attempt: u32,
@@ -109,6 +115,18 @@ pub struct TaskEnvelope {
     /// Set when this task is a step of a chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<ChainLink>,
+}
+
+impl PartialEq for TaskEnvelope {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.processor_type == other.processor_type
+            && self.context.get() == other.context.get()
+            && self.attempt == other.attempt
+            && self.enqueued_at == other.enqueued_at
+            && self.last_error == other.last_error
+            && self.chain == other.chain
+    }
 }
 
 /// Position of a task within a chain, and the steps that follow it.
@@ -151,7 +169,7 @@ mod tests {
         let env = TaskEnvelope {
             id: TaskId::new(),
             processor_type: "email".into(),
-            context: serde_json::json!({ "to": "a@b.c" }),
+            context: serde_json::value::to_raw_value(&serde_json::json!({ "to": "a@b.c" })).unwrap(),
             attempt: 2,
             enqueued_at: 42,
             last_error: Some("boom".into()),

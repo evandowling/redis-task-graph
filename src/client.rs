@@ -146,7 +146,7 @@ impl TaskQueue {
         let envelope = TaskEnvelope {
             id: TaskId::new(),
             processor_type: task.into_name(),
-            context: serde_json::to_value(context)?,
+            context: serde_json::value::to_raw_value(context)?,
             attempt: 0,
             enqueued_at: now_millis(),
             last_error: None,

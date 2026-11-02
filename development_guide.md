@@ -104,7 +104,7 @@ Every script checks ownership with `XPENDING stream group id id 1 consumer`.
 pub struct TaskEnvelope {
     pub id: TaskId,               // UUID v4, stable across retries
     pub processor_type: String,   // also determines the stream and retry set
-    pub context: serde_json::Value,
+    pub context: Box<RawValue>,   // JSON text, never parsed into a serde_json::Value
     pub attempt: u32,             // failed attempts so far
     pub enqueued_at: u64,         // ms since epoch, producer clock
     pub last_error: Option<String>,
@@ -113,6 +113,7 @@ pub struct TaskEnvelope {
 ```
 
 - **Compatibility.** Optional fields use `#[serde(default)]`, so older envelopes still decode. Add new fields the same way. A field that fails to decode makes the whole entry undecodable, and it is dead-lettered without retries.
+- **The context is decoded once.** It stays raw JSON text from submit to processor: `submit` serializes `In` straight to text, the worker copies that text out of the envelope, and the handler deserializes `In` from it directly, before spawning the processor. A step's output is serialized straight to text too, and becomes the next envelope's context as-is. Parsing it into a `serde_json::Value` would allocate a node per array element and map entry, which dominated the cost for large number- and byte-heavy contexts.
 - **Plan travels with the task.** `ChainLink::remaining` carries the rest of the chain's step types inside each step's envelope. A chain's plan therefore needs no separate storage and no lookup per step.
 - **Stream entry id ≠ task id.** A retry gets a new stream entry id (it's re-added) and keeps its `TaskId`. Code that talks to Redis uses the entry id. Logs and dead letters use the task id.
 

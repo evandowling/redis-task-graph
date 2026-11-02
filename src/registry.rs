@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::value::RawValue;
 
 use crate::error::{BoxError, Error, Result};
 use crate::control::TaskControl;
@@ -38,7 +39,7 @@ pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 pub(crate) type ErasedHandler = Arc<
-    dyn Fn(serde_json::Value, TaskControl) -> BoxFuture<'static, std::result::Result<serde_json::Value, HandlerError>>
+    dyn Fn(&RawValue, TaskControl) -> BoxFuture<'static, std::result::Result<Box<RawValue>, HandlerError>>
         + Send
         + Sync,
 >;
@@ -157,15 +158,17 @@ impl Registry {
             return Err(Error::DuplicateProcessor(processor_type));
         }
         let processor = Arc::new(processor);
-        let handler: ErasedHandler = Arc::new(move |value, control| {
+        let handler: ErasedHandler = Arc::new(move |raw: &RawValue, control| {
+            // Decoded here, straight from the stored JSON text, so the future doesn't need its
+            // own copy of the context.
+            let context = serde_json::from_str::<In>(raw.get());
             let processor = processor.clone();
             Box::pin(async move {
-                let context: In = serde_json::from_value(value)
-                    .map_err(|e| HandlerError::Fatal(format!("invalid context: {e}")))?;
+                let context = context.map_err(|e| HandlerError::Fatal(format!("invalid context: {e}")))?;
                 let output = processor(context, control)
                     .await
                     .map_err(|e| HandlerError::Failed(error_chain(&*e)))?;
-                serde_json::to_value(output)
+                serde_json::value::to_raw_value(&output)
                     .map_err(|e| HandlerError::Fatal(format!("invalid output: {e}")))
             })
         });
@@ -223,8 +226,11 @@ mod tests {
             if ctx.n == 1 { Ok(()) } else { Err("bad n".into()) }
         })
         .unwrap();
-        let h = |v| (reg.get("t").unwrap().handler)(v, TaskControl::detached());
-        assert_eq!(h(serde_json::json!({ "n": 1 })).await.unwrap(), serde_json::Value::Null);
+        let h = |v: serde_json::Value| {
+            let raw = serde_json::value::to_raw_value(&v).unwrap();
+            (reg.get("t").unwrap().handler)(&raw, TaskControl::detached())
+        };
+        assert_eq!(h(serde_json::json!({ "n": 1 })).await.unwrap().get(), "null");
         assert!(matches!(h(serde_json::json!({ "n": 2 })).await, Err(HandlerError::Failed(_))));
         assert!(matches!(h(serde_json::json!({ "x": 1 })).await, Err(HandlerError::Fatal(_))));
     }
@@ -234,8 +240,9 @@ mod tests {
         const DOUBLE: TaskType<u32, u32> = TaskType::new("double");
         let mut reg = Registry::new();
         reg.register(DOUBLE, |n| async move { Ok(n * 2) }).unwrap();
-        let h = |v| (reg.get("double").unwrap().handler)(v, TaskControl::detached());
-        assert_eq!(h(serde_json::json!(21)).await.unwrap(), serde_json::json!(42));
+        let raw = serde_json::value::to_raw_value(&21).unwrap();
+        let output = (reg.get("double").unwrap().handler)(&raw, TaskControl::detached()).await.unwrap();
+        assert_eq!(output.get(), "42");
     }
 
     #[test]

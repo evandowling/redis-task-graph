@@ -7,7 +7,9 @@ include breaking changes.
 
 ## [Unreleased]
 
-### Changed
+### Breaking
+
+- **`TaskEnvelope::context` is a `Box<RawValue>`** instead of a `serde_json::Value`. The context stays as JSON text until it is decoded straight into the processor's input type, so it is no longer parsed into a `Value` tree, then cloned, then converted. Decode it yourself with `serde_json::from_str(envelope.context.get())`. `TaskEnvelope` compares contexts by their JSON text. In benchmarks, no-op tasks with 64–512 KB byte-array contexts run 2.5x faster, and `u32` arrays 35–45% faster. Large text contexts on plain tasks are 10–30% slower for now, because the context is scanned once to find its end within the envelope and again to decode it.
 
 - **Idle workers' monitors sleep.** While a worker holds no leases, its monitor thread wakes once a second instead of every probe interval (10 ms by default). Claiming a task wakes it at once, so the first lease renewal is never late. Benchmarks are unchanged.
 - **Every public item is documented**, and every fallible public function has an "Errors" section. The crate now forbids `unsafe` code and warns on `missing_docs` and `clippy::missing_errors_doc`, which CI treats as errors.
