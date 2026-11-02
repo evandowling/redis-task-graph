@@ -47,6 +47,30 @@ fn value(export: &ResourceMetrics, name: &str, attrs: &[(&str, &str)]) -> Option
     })
 }
 
+/// Deletes a test's namespace when dropped, also when the test panics. A blocking connection,
+/// since a task spawned here may never run once the test's runtime shuts down.
+struct Cleanup {
+    url: String,
+    ns: String,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let Ok(mut conn) = redis::Client::open(self.url.as_str())
+            .and_then(|c| c.get_connection_with_timeout(Duration::from_secs(2)))
+        else {
+            return;
+        };
+        let keys: Vec<String> = match redis::Commands::scan_match(&mut conn, format!("{{{}}}:*", self.ns)) {
+            Ok(keys) => keys.filter_map(Result::ok).collect(),
+            Err(_) => return,
+        };
+        for chunk in keys.chunks(1000) {
+            let _: redis::RedisResult<()> = redis::Commands::del(&mut conn, chunk);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn records_task_lifecycle_metrics() {
     let exporter = InMemoryMetricExporter::default();
@@ -61,6 +85,7 @@ async fn records_task_lifecycle_metrics() {
         eprintln!("skipping: Redis not reachable at {url}");
         return;
     };
+    let _cleanup = Cleanup { url, ns };
 
     let mut reg = Registry::new();
     reg.register("ok", |_: u32| async { Ok(()) }).unwrap();
