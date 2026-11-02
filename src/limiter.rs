@@ -64,6 +64,7 @@ impl Limiter {
         } else if limit > old {
             let mut added = limit - old;
             // Cancel outstanding debt before putting new permits into circulation.
+            #[allow(deprecated)] // renamed `try_update`, which Rust 1.89 lacks
             let _ = self.debt.fetch_update(Ordering::AcqRel, Ordering::Acquire, |debt| {
                 let paid = debt.min(added);
                 added = limit - old - paid;
@@ -110,6 +111,7 @@ pub(crate) struct Permit {
 impl Drop for Permit {
     fn drop(&mut self) {
         self.limiter.in_flight.fetch_sub(1, Ordering::AcqRel);
+        #[allow(deprecated)] // renamed `try_update`, which Rust 1.89 lacks
         let pays_debt = self
             .limiter
             .debt
