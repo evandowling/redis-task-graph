@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redis::AsyncCommands;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
@@ -11,7 +11,37 @@ use serde::de::DeserializeOwned;
 use crate::chain::{ChainBuilder, ChainId, ChainStatus, parse_status};
 use crate::error::{Error, Result};
 use crate::keys::{self, Keys};
-use crate::task::{CONTEXT_FIELD, IntoTaskType, PAYLOAD_FIELD, TaskEnvelope, TaskHeader, TaskId};
+use crate::scripts;
+use crate::task::{
+    CONTEXT_FIELD, IntoTaskType, PAYLOAD_FIELD, Task, TaskEnvelope, TaskHeader, TaskId,
+};
+
+/// When a scheduled task becomes due.
+enum Due {
+    /// This long after the script runs, on Redis's clock.
+    After(Duration),
+    /// At this time; one before the epoch is treated as already due.
+    At(SystemTime),
+}
+
+impl Due {
+    /// Delays and times beyond this many milliseconds (about 285,000 years) are capped, so the
+    /// due time stays exact as a Lua number and a sorted-set score.
+    const MAX_MS: u64 = 1 << 53;
+
+    /// The due time as [`scripts::SCHEDULE`] takes it.
+    fn spec(&self) -> String {
+        let ms = |d: Duration| {
+            u64::try_from(d.as_millis())
+                .unwrap_or(u64::MAX)
+                .min(Self::MAX_MS)
+        };
+        match self {
+            Self::After(delay) => format!("+{}", ms(*delay)),
+            Self::At(at) => ms(at.duration_since(UNIX_EPOCH).unwrap_or_default()).to_string(),
+        }
+    }
+}
 
 /// An entry in the dead-letter stream, from [`TaskQueue::dead_letters`].
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +196,109 @@ impl TaskQueue {
             .await?;
         crate::telemetry::task_submitted(self.namespace(), &header.processor_type);
         Ok(header.id)
+    }
+
+    /// Like [`TaskQueue::submit`], but the task becomes available to workers once `delay` has
+    /// passed on Redis's clock. A zero delay queues it at once.
+    ///
+    /// Workers move due tasks onto the stream every
+    /// [`promote_interval`](crate::WorkerConfig::promote_interval), so a task runs up to that
+    /// long after it is due, and never before. Until then it waits in the processor type's
+    /// delayed set alongside retries, and is stored as one JSON envelope, as retries are.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`] if `context` can't be serialized, or [`Error::Redis`] if Redis can't be reached or the command fails.
+    pub async fn submit_after<In: Serialize, Out>(
+        &self,
+        task: impl IntoTaskType<In, Out>,
+        context: &In,
+        delay: Duration,
+    ) -> Result<TaskId> {
+        let ids = self
+            .schedule(task.into_name(), [(context, Due::After(delay))])
+            .await?;
+        Ok(ids[0])
+    }
+
+    /// Like [`TaskQueue::submit_after`], but the task becomes available at `at`. A time that has
+    /// already passed queues it at once.
+    ///
+    /// `at` comes from this process's clock and is compared with Redis's, so clock skew between
+    /// the two shifts when the task runs. Prefer [`TaskQueue::submit_after`] for delays measured
+    /// from now.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`] if `context` can't be serialized, or [`Error::Redis`] if Redis can't be reached or the command fails.
+    pub async fn submit_at<In: Serialize, Out>(
+        &self,
+        task: impl IntoTaskType<In, Out>,
+        context: &In,
+        at: SystemTime,
+    ) -> Result<TaskId> {
+        let ids = self
+            .schedule(task.into_name(), [(context, Due::At(at))])
+            .await?;
+        Ok(ids[0])
+    }
+
+    /// Schedules many tasks of one processor type, each with its own delay, as for
+    /// [`TaskQueue::submit_after`]. Returns their ids in order.
+    ///
+    /// Tasks are sent in batches of up to 1,000, one round trip and one atomic script call per
+    /// batch.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`] if a context can't be serialized, in which case nothing is
+    /// scheduled. [`Error::Redis`] if Redis can't be reached or a command fails, in which case
+    /// the batches before the failing one have been scheduled.
+    pub async fn submit_many_after<'a, In: Serialize + 'a, Out>(
+        &self,
+        task: impl IntoTaskType<In, Out>,
+        tasks: impl IntoIterator<Item = (&'a In, Duration)>,
+    ) -> Result<Vec<TaskId>> {
+        let tasks = tasks
+            .into_iter()
+            .map(|(context, delay)| (context, Due::After(delay)));
+        self.schedule(task.into_name(), tasks).await
+    }
+
+    /// Serializes every task, then runs [`scripts::SCHEDULE`] once per batch.
+    async fn schedule<'a, In: Serialize + 'a>(
+        &self,
+        processor_type: String,
+        tasks: impl IntoIterator<Item = (&'a In, Due)>,
+    ) -> Result<Vec<TaskId>> {
+        const BATCH: usize = 1000;
+        let mut ids = Vec::new();
+        let mut args = Vec::new();
+        for (context, due) in tasks {
+            let task = Task {
+                header: TaskHeader::new(processor_type.clone(), None),
+                context: serde_json::to_string(context)?.into_boxed_str(),
+            };
+            ids.push(task.header.id);
+            args.push((due.spec(), task.to_envelope_json()));
+        }
+        let (delayed, stream) = (
+            self.keys.delayed(&processor_type),
+            self.keys.stream(&processor_type),
+        );
+        let mut conn = self.conn.clone();
+        for batch in args.chunks(BATCH) {
+            let mut invocation = scripts::SCHEDULE.prepare_invoke();
+            invocation.key(&delayed).key(&stream).arg(PAYLOAD_FIELD);
+            for (spec, payload) in batch {
+                invocation.arg(spec).arg(payload);
+            }
+            let _: usize = invocation.invoke_async(&mut conn).await?;
+            for _ in batch {
+                crate::telemetry::task_submitted(self.namespace(), &processor_type);
+            }
+        }
+        Ok(ids)
     }
 
     /// Starts building a chain whose first step runs `first` with `input`. Add steps with

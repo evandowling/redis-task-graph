@@ -154,6 +154,37 @@ return #due
     )
 });
 
+/// KEYS: one processor type's delayed set, that type's stream. ARGV: field, then a due time and
+/// an envelope for each task. A due time is `+<ms>` for a delay from now, or `<ms>` for a time in
+/// milliseconds since the Unix epoch; both are measured on Redis's clock. Schedules each task in
+/// the delayed set, or adds it to the stream at once if it is already due. Returns the number
+/// added to the stream.
+pub(crate) static SCHEDULE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local queued = 0
+for i = 2, #ARGV, 2 do
+  local spec, payload = ARGV[i], ARGV[i + 1]
+  local due
+  if string.sub(spec, 1, 1) == '+' then
+    due = now + tonumber(string.sub(spec, 2))
+  else
+    due = tonumber(spec)
+  end
+  if due <= now then
+    redis.call('XADD', KEYS[2], '*', ARGV[1], payload)
+    queued = queued + 1
+  else
+    redis.call('ZADD', KEYS[1], due, payload)
+  end
+end
+return queued
+",
+    )
+});
+
 /// KEYS: the 0.1 shared delayed set, dead. ARGV: 0.1 stream_prefix, limit, field, dead_max_len.
 /// Moves due 0.1 retries back onto their processor type's 0.1 stream. Returns the number moved.
 /// It builds stream keys from task data, which is why 0.2 replaced it; it runs only while a

@@ -7,6 +7,14 @@ include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Delayed tasks.** `TaskQueue::submit_after` and `submit_at` submit a task that workers pick up once its due time passes, and `submit_many_after` schedules many tasks of one type with one round trip per 1,000. Delays are measured on Redis's clock. Delayed tasks wait in the processor type's retry set and are promoted like retries, so workers from 0.2 onward run them. They run up to `promote_interval` after they are due, and can't be cancelled.
+
+### Changed
+
+- **The `rtg.queue.delayed` gauge** now counts delayed submissions as well as retries; its description says so.
+
 ## [0.3.0] - 2026-11-01
 
 ### Breaking

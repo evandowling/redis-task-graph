@@ -75,7 +75,7 @@ Every key starts with the namespace `ns` from `TaskQueue::connect(url, ns)` in a
 |---|---|---|
 | `{ns}:stream:{type}` | Stream | One entry per pending task, with field `task` holding the envelope JSON. Entries are deleted (`XDEL`) once their outcome is recorded, so stream length ≈ backlog plus in flight. |
 | `ns:workers` | Consumer group (on every stream) | Created with `XGROUP CREATE … 0 MKSTREAM` when a worker starts. Starting at `0` delivers tasks submitted before any worker existed. `BUSYGROUP` errors are ignored. |
-| `{ns}:delayed:{type}` | Sorted set | Envelope JSON of one processor type's waiting retries, scored by due time in milliseconds of Redis server time |
+| `{ns}:delayed:{type}` | Sorted set | Envelope JSON of one processor type's waiting retries and delayed submissions, scored by due time in milliseconds of Redis server time |
 | `{ns}:chain:{uuid}` | Hash | Chain status: `state` (`running`, `completed` or `failed`), `step`, `total`, plus `output` or `error`. Gets a TTL when the chain finishes. |
 | `{ns}:dead` | Stream | Dead-lettered envelopes (field `task`), capped with `XADD MAXLEN ~` |
 
@@ -121,6 +121,7 @@ pub struct TaskEnvelope {
 ## 5. Producer path
 
 - **`TaskQueue::submit`** builds an envelope, serializes it and runs a single `XADD`. `TaskQueue` holds a `ConnectionManager`, a multiplexed and auto-reconnecting connection. Concurrent submits from clones of one `TaskQueue` are pipelined on it. That is why submissions scale to more than 500k/s with many producers but sit near 28k/s for one sequential producer: they're bound by round trips.
+- **`submit_after`, `submit_at` and `submit_many_after`** serialize every task first, so a bad context schedules nothing, then run `SCHEDULE` once per 1,000 tasks. The script reads Redis `TIME` once and takes a due spec per task: `+<ms>` relative to that time, or `<ms>` since the epoch. A future task is `ZADD`ed into the type's delayed set as whole-envelope JSON (`Task::to_envelope_json`), exactly as `RETRY_OR_DEAD` stores a retry, so `PROMOTE` handles both and workers back to 0.2 can promote it. A task already due is `XADD`ed at once in the same single-field layout. Delays are capped at 2^53 ms so due times stay exact as Lua numbers.
 - **`ChainBuilder::submit`** runs `MULTI · HSET status · XADD first step · EXEC`. The status hash exists before the first step can run, so a worker's `ADVANCE` never races a missing hash.
 - **The typed layer is compile-time only.** `IntoTaskType<In,Out>` is implemented for:
   - `TaskType<In,Out>`;
@@ -355,7 +356,7 @@ Controller unit tests are at the bottom of `monitor.rs`. The integration test `b
 
 - **Backoff:** `backoff(attempt, base, max)` computes `base·2^(attempt−1)` capped at `max`, then jitters uniformly within `[d/2, d]`. Unit test: `backoff_grows_and_caps`.
 - **Scheduling a retry:** `RETRY_OR_DEAD` in `retry` mode computes the due time from Redis `TIME`, so worker clock skew doesn't matter. It then `ZADD`s the updated envelope JSON, with `attempt` incremented and `last_error` set, as the member. The JSON is unique per task and attempt because it includes the task id and the attempt.
-- **Promotion:** `promote_loop` runs `PROMOTE` every `promote_interval` for each of the worker's processor types, moving up to 100 due members per call. It loops while a call moves all 100. Every worker promotes the retries of the types it runs, so a type's retries wait until a worker for that type is running, like its queued tasks. Running it more than once is harmless because the script is atomic: a member is moved once.
+- **Promotion:** `promote_loop` runs `PROMOTE` every `promote_interval` for each of the worker's processor types, moving up to 100 due members per call. Delayed submissions (section 5) share the set and are promoted the same way; nothing distinguishes them from retries except `attempt` being 0. It loops while a call moves all 100. Every worker promotes the retries of the types it runs, so a type's retries wait until a worker for that type is running, like its queued tasks. Running it more than once is harmless because the script is atomic: a member is moved once.
 - **Dead letters:** `XADD {ns}:dead MAXLEN ~ dead_letter_max_len`.
   - Undecodable entries are stored as `{"raw": <payload>, "last_error": …}` rather than as a `TaskEnvelope`.
   - 0.1 retries whose payload `LEGACY_PROMOTE` can't route are dead-lettered verbatim.
@@ -554,6 +555,8 @@ git worktree remove ../rtg-baseline
 - **Abort on lease loss.** Lease loss only *signals* the processor (`CancelReason::LeaseLost`). Aborting processors that ignore the signal would cut duplicate side effects further, but could interrupt them mid-operation.
 - **Redis Cluster.** The key layout and scripts are Cluster-ready (section 3); what remains is connecting through `redis::cluster` and testing against a real Cluster.
 - **Push-based chain completion.** `wait_for_chain` polls; keyspace notifications or a per-chain stream would remove that.
+- **Cancelling delayed tasks.** Delayed-set members are whole envelopes, so removing one by `TaskId` would need its exact bytes or a `ZSCAN`. Supporting `cancel`/`reschedule` means id-keyed storage: a sorted set of ids plus a hash of header and context per type. That would also let `PROMOTE` write the split two-field layout, so retries and delayed tasks keep the single-scan decode. It needs new key names, with workers promoting both layouts during an upgrade, as for 0.1.
+- **Promotion latency.** Delayed tasks and retries run up to `promote_interval` late. `PROMOTE` could return the next due score so `promote_loop` sleeps until then, tightening latency without more polling.
 
 ## 19. Releasing
 

@@ -1751,3 +1751,99 @@ mod consumers {
         );
     }
 }
+
+mod delayed {
+    use super::*;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    async fn zcard(t: &mut TestQueue, processor_type: &str) -> usize {
+        let key = format!("{{{}}}:delayed:{processor_type}", t.queue.namespace());
+        t.conn.zcard(key).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn future_tasks_wait_and_due_ones_are_queued_at_once() {
+        let Some(mut t) = setup().await else { return };
+        t.queue.submit_after("t", &ctx(1), HOUR).await.unwrap();
+        t.queue
+            .submit_at("t", &ctx(2), SystemTime::now() + HOUR)
+            .await
+            .unwrap();
+        assert_eq!((zcard(&mut t, "t").await, t.xlen("t").await), (2, 0));
+
+        t.queue
+            .submit_after("t", &ctx(3), Duration::ZERO)
+            .await
+            .unwrap();
+        t.queue.submit_at("t", &ctx(4), UNIX_EPOCH).await.unwrap();
+        t.queue
+            .submit_at("t", &ctx(5), SystemTime::now() - HOUR)
+            .await
+            .unwrap();
+        assert_eq!((zcard(&mut t, "t").await, t.xlen("t").await), (2, 3));
+    }
+
+    #[tokio::test]
+    async fn delayed_task_runs_after_its_delay_with_its_context() {
+        let Some(t) = setup().await else { return };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reg = Registry::new();
+        reg.register("echo", move |c: Ctx| {
+            let tx = tx.clone();
+            async move {
+                tx.send(c).unwrap();
+                Ok(())
+            }
+        })
+        .unwrap();
+        let worker = fast(Worker::builder(t.queue.clone(), reg))
+            .spawn()
+            .await
+            .unwrap();
+        let delay = Duration::from_millis(400);
+        let submitted = Instant::now();
+        t.queue.submit_after("echo", &ctx(9), delay).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the delayed task runs")
+            .unwrap();
+        assert!(
+            submitted.elapsed() >= delay,
+            "ran after {:?}",
+            submitted.elapsed()
+        );
+        assert_eq!(got, ctx(9));
+        worker.shutdown().await;
+        assert!(t.queue.dead_letters(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn many_tasks_are_scheduled_across_batches() {
+        let Some(mut t) = setup().await else { return };
+        let contexts: Vec<Ctx> = (0..1500).map(ctx).collect();
+        let ids = t
+            .queue
+            .submit_many_after(
+                "t",
+                contexts
+                    .iter()
+                    .map(|c| (c, if c.n % 2 == 0 { Duration::ZERO } else { HOUR })),
+            )
+            .await
+            .unwrap();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!((ids.len(), unique.len()), (1500, 1500));
+        assert_eq!((zcard(&mut t, "t").await, t.xlen("t").await), (750, 750));
+
+        let none: Vec<(&Ctx, Duration)> = Vec::new();
+        assert!(
+            t.queue
+                .submit_many_after("t", none)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

@@ -26,6 +26,7 @@ Related documents:
 - [Execution model](#execution-model)
 - [Writing processors](#writing-processors)
 - [Chains](#chains)
+- [Delayed tasks](#delayed-tasks)
 - [Failures, retries and dead letters](#failures-retries-and-dead-letters)
 - [Delivery guarantees](#delivery-guarantees)
 - [Configuring workers](#configuring-workers)
@@ -291,6 +292,28 @@ How chains work:
 
 **When to use one.** A chain's latency is the *sum* of its steps, because they run one after another. Use a chain when a step really needs the previous step's output, and submit independent tasks when work can run in parallel. Each hop carries the step's output through Redis, so pass references (object-store keys, row ids) rather than large payloads. Above about 64 KB, chains move data 2–4× more slowly than plain tasks.
 
+## Delayed tasks
+
+`submit_after` and `submit_at` submit a task that becomes available to workers later:
+
+```rust
+queue.submit_after(REMIND, &Reminder { user_id }, Duration::from_secs(3600)).await?;
+queue.submit_at(REPORT, &Report { day }, midnight).await?;            // midnight: SystemTime
+
+// Many tasks of one type, each with its own delay: one round trip per 1,000 tasks.
+let ids = queue
+    .submit_many_after(PING, hosts.iter().zip(delays.iter().copied()))
+    .await?;
+```
+
+- **Never early, up to `promote_interval` late.** A delayed task waits in its processor type's retry set (`{<namespace>}:delayed:<type>`). Workers that run the type move due tasks onto the stream every `promote_interval` (500 ms by default), and the task is then claimed like any other.
+- **Redis's clock.** `submit_after` measures the delay on the Redis server's clock, so the producer's clock doesn't matter. `submit_at` takes a time from the producer's clock, so skew between the producer and Redis shifts when the task runs.
+- **Due at once.** A zero delay, or a time that has passed, queues the task immediately.
+- **No cancellation.** Once scheduled, a task can't be cancelled or rescheduled by its id. To skip one, have the processor check whether it is still wanted.
+- **Storage.** A delayed task is stored as one JSON envelope, like a retry, so its context is scanned once more when it runs than a task submitted with `submit`. This only matters for large contexts.
+
+Workers from 0.2 onward promote delayed tasks, so you can submit them before upgrading every worker to this version.
+
 ## Failures, retries and dead letters
 
 | What happened | Result |
@@ -545,7 +568,7 @@ For lighter needs, `WorkerHandle::stats()` gives the live concurrency limit, tas
 - **No fan-out or fan-in yet.** Chains are linear: each step has one input and one output.
 - **No priorities or per-type rate limits.** A worker reads all its streams with equal weight. Use separate pools to isolate types.
 - **Chain status is polled.** `wait_for_chain` polls every 10 ms at first, backing off to every 500 ms; there's no push notification.
-- **Clock-based timing.** Retry due times use the Redis server's clock. The queue-time metric uses the producer's and worker's clocks, so skew between machines shows up in it.
+- **Clock-based timing.** Retry and `submit_after` due times use the Redis server's clock; `submit_at` uses the producer's. The queue-time metric uses the producer's and worker's clocks, so skew between machines shows up in it.
 - **Crashed workers leave consumers behind.** A worker removes its consumer from the group on graceful shutdown, unless the consumer still has pending entries. A worker that crashes or is killed leaves its consumer in the group; it's harmless but clutters `XINFO CONSUMERS`. Remove idle ones with no pending entries using `XGROUP DELCONSUMER`.
 
 ## Upgrading from 0.2

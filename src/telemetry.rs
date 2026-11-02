@@ -427,7 +427,7 @@ mod imp {
                 ),
                 meter
                     .u64_observable_gauge("rtg.queue.delayed")
-                    .with_description("Tasks waiting for a retry")
+                    .with_description("Tasks waiting for a retry or a scheduled start")
                     .with_callback(|observer| {
                         let mut delayed = DELAYED.lock().unwrap();
                         delayed.retain(|_, (_, at)| at.elapsed() < STALE_AFTER);
