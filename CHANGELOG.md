@@ -7,6 +7,8 @@ include breaking changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Breaking
 
 - **`TaskEnvelope::context` is a `Box<RawValue>`** instead of a `serde_json::Value`. The context stays as JSON text until it is decoded straight into the processor's input type, so it is no longer parsed into a `Value` tree, then cloned, then converted. Decode it yourself with `serde_json::from_str(envelope.context.get())`. `TaskEnvelope` compares contexts by their JSON text.
